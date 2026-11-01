@@ -32,7 +32,7 @@ endif()
 set_target_properties(hkey PROPERTIES OUTPUT_NAME HKey)
 target_include_directories(hkey PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(hkey PRIVATE UNICODE _UNICODE HKEY_VERSION="${HKEY_VERSION}" VIKEY_VERSION="${HKEY_VERSION}")
-target_link_libraries(hkey PRIVATE vikey_engine user32 shell32 gdi32 advapi32 imm32 psapi ole32 oleaut32 comctl32 gdiplus winhttp winmm d2d1 dwrite dwmapi normaliz)
+target_link_libraries(hkey PRIVATE vikey_engine user32 shell32 gdi32 advapi32 imm32 psapi ole32 oleaut32 comctl32 comdlg32 gdiplus winhttp winmm d2d1 dwrite dwmapi normaliz)
 
 # Alias vikey target to hkey for compatibility
 add_custom_target(vikey DEPENDS hkey)

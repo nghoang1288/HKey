@@ -1,5 +1,8 @@
 #include "Prefs.h"
 #include <shlobj.h>
+#include <shellapi.h>
+#include <algorithm>
+#include <sstream>
 
 namespace vikey { namespace prefs {
 
@@ -93,6 +96,134 @@ void setLaunchAtLogin(bool on) {
         RegSetValueExW(h, L"HKey", 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t)));
     } else RegDeleteValueW(h, L"HKey");
     RegCloseKey(h);
+}
+
+static const wchar_t* TASK_NAME = L"HKeyAutoStartAdmin";
+
+bool isTaskSchedulerAdminAutostart() {
+    int regVal = getInt(L"RunAsAdminTask", -1);
+    wchar_t cmd[] = L"schtasks.exe /Query /TN \"HKeyAutoStartAdmin\"";
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    bool exists = false;
+    if (CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 1000);
+        DWORD exitCode = 1;
+        if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == 0) {
+            exists = true;
+        }
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    } else if (regVal == 1) {
+        exists = true;
+    }
+    return exists;
+}
+
+bool setTaskSchedulerAdminAutostart(bool on) {
+    if (on) {
+        wchar_t exe[MAX_PATH];
+        GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        std::wstring params = L"/Create /TN \"" + std::wstring(TASK_NAME) + L"\" /TR \"\\\"" + exe + L"\\\"\" /SC ONLOGON /RL HIGHEST /F";
+
+        SHELLEXECUTEINFOW sei = {sizeof(sei)};
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = L"schtasks.exe";
+        sei.lpParameters = params.c_str();
+        sei.nShow = SW_HIDE;
+
+        if (ShellExecuteExW(&sei) && sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, 5000);
+            DWORD exitCode = 1;
+            GetExitCodeProcess(sei.hProcess, &exitCode);
+            CloseHandle(sei.hProcess);
+            if (exitCode == 0) {
+                setLaunchAtLogin(false);
+                setInt(L"RunAsAdminTask", 1);
+                return true;
+            }
+        }
+        return false;
+    } else {
+        std::wstring params = L"/Delete /TN \"" + std::wstring(TASK_NAME) + L"\" /F";
+
+        SHELLEXECUTEINFOW sei = {sizeof(sei)};
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = L"schtasks.exe";
+        sei.lpParameters = params.c_str();
+        sei.nShow = SW_HIDE;
+
+        if (ShellExecuteExW(&sei) && sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, 5000);
+            CloseHandle(sei.hProcess);
+        }
+        setInt(L"RunAsAdminTask", 0);
+        return true;
+    }
+}
+
+static const wchar_t* DEFAULT_BLACKLIST = L"photoshop.exe;illustrator.exe;acad.exe;valorant.exe;league of legends.exe;cs2.exe;dota2.exe;genshinimpact.exe;overwatch.exe";
+
+bool isBlacklistEnabled() {
+    return getInt(L"BlacklistEnabled", 1) != 0;
+}
+
+void setBlacklistEnabled(bool on) {
+    setInt(L"BlacklistEnabled", on ? 1 : 0);
+}
+
+static std::wstring toLower(std::wstring s) {
+    for (auto& c : s) c = towlower(c);
+    return s;
+}
+
+std::vector<std::wstring> getBlacklist() {
+    std::wstring raw = getString(L"Blacklist", DEFAULT_BLACKLIST);
+    std::vector<std::wstring> list;
+    std::wstringstream ss(raw);
+    std::wstring item;
+    while (std::getline(ss, item, L';')) {
+        size_t first = item.find_first_not_of(L" \t\r\n");
+        if (first == std::wstring::npos) continue;
+        size_t last = item.find_last_not_of(L" \t\r\n");
+        std::wstring clean = toLower(item.substr(first, last - first + 1));
+        if (!clean.empty()) {
+            if (std::find(list.begin(), list.end(), clean) == list.end()) {
+                list.push_back(clean);
+            }
+        }
+    }
+    return list;
+}
+
+void setBlacklist(const std::vector<std::wstring>& list) {
+    std::wstring raw;
+    for (size_t i = 0; i < list.size(); i++) {
+        std::wstring item = toLower(list[i]);
+        if (item.empty()) continue;
+        if (!raw.empty()) raw += L";";
+        raw += item;
+    }
+    setString(L"Blacklist", raw);
+}
+
+bool isAppBlacklisted(const std::wstring& exeName) {
+    if (!isBlacklistEnabled()) return false;
+    if (exeName.empty() || exeName == L"UnknownApp") return false;
+    std::wstring name = exeName;
+    size_t slash = name.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) name = name.substr(slash + 1);
+    name = toLower(name);
+
+    auto list = getBlacklist();
+    for (const auto& item : list) {
+        if (item == name) return true;
+    }
+    return false;
 }
 
 void migrateFromOpenKey() {

@@ -24,6 +24,7 @@
 #include "Emoji.h"
 #include "resource.h"
 #include <commctrl.h>
+#include <commdlg.h>
 #include <windowsx.h>
 #include <shellapi.h>
 #include <objidl.h>
@@ -318,7 +319,10 @@ static void destroyChildren(HWND h) { std::vector<HWND> kids; for (HWND c = GetW
 
 // ---- main window -----------------------------------------------------------------------------
 enum { C_SEG = 200, C_HOTKEY, C_BEEP, C_AUTO, C_PAUSE, C_SMART, C_SITE, C_MARK, C_SPELL, C_RESTORE, C_MACRO, C_MACROFILE, C_LOGIN, C_UPDATE, C_LOGKEYS, C_EMOJI, C_EMOJIKEY,
+       C_ROTATION, C_BLACKLIST_TOGGLE, C_BLACKLIST_BTN, C_ADMIN_TASK,
+       BL_LIST = 280, BL_ADD_RUNNING, BL_ADD_FILE, BL_REMOVE, BL_RESET, BL_CLOSE,
        L_REFRESH = 300, L_OPEN, L_CLEAR, A_LINK = 400, O_BACK = 500, O_NEXT, O_REC, O_BEEP, O_EMOJI, O_EMOJIKEY, O_EDIT = 520 };
+static void showBlacklistDialog(HWND parent);
 static const UINT WM_REBUILD = WM_APP + 20;
 static HWND _win, _seg, _hint, _logWin, _logList, _logSummary, _logGrid, _aboutWin, _onbWin, _ackWin, _tooltip;
 static std::map<int, HWND> _ctl;
@@ -399,6 +403,7 @@ static void buildMain() {
     HWND mark = row(L"Đặt dấu", L"Vị trí dấu thanh với oa, oe, uy: kiểu mới (hoà, thuý) hoặc kiểu cũ (hòa, thúy).", L"COMBOBOX", C_MARK, 130, 200, CBS_DROPDOWNLIST | WS_TABSTOP);
     SendMessageW(mark, CB_ADDSTRING, 0, (LPARAM)L"hoà, thuý"); SendMessageW(mark, CB_ADDSTRING, 0, (LPARAM)L"hòa, thúy"); SendMessageW(mark, CB_SETCURSEL, prefs::getInt(L"ModernOrthography", 1) ? 0 : 1, 0);
     SetWindowPos(mark, nullptr, W - MARGIN - 16 - 130, _y - ROW + 4, 130, 200, SWP_NOZORDER);
+    toggleRow(L"Bỏ dấu xoay vòng", L"Cho phép đổi dấu thanh tức thì khi gõ phím dấu khác (s, f, r, x, j) mà không cần xóa đi gõ lại.", C_ROTATION, prefs::getInt(L"RotationalTone", 1) != 0);
     toggleRow(L"Kiểm tra chính tả", L"Chỉ bỏ dấu khi từ đang gõ đúng quy tắc chính tả tiếng Việt.", C_SPELL, prefs::getInt(L"Spelling", 1) != 0);
     toggleRow(L"Trả lại phím khi sai", L"Khi gõ xong một từ sai chính tả tiếng Việt, HKey trả lại đúng các phím bạn đã gõ.", C_RESTORE, prefs::getInt(L"RestoreIfInvalidWord", 1) != 0);
     endGroup();
@@ -406,6 +411,11 @@ static void buildMain() {
     toggleRow(L"Bật gõ tắt", L"Tự động thay thế từ viết tắt bằng từ đầy đủ khi gõ phím cách hoặc dấu câu (macro.txt).", C_MACRO, prefs::getInt(L"UseMacro", 1) != 0);
     HWND btnMacro = row(L"Bảng từ gõ tắt", L"Mở file danh sách gõ tắt (macro.txt) để xem hoặc chỉnh sửa.", L"VikeyButton", C_MACROFILE, 100, 26, WS_TABSTOP);
     SetWindowTextW(btnMacro, L"Mở file…"); setBg(btnMacro, GROUP);
+    endGroup();
+    beginGroup(L"Chế độ Game & Blacklist");
+    toggleRow(L"Bật loại trừ ứng dụng", L"Tự động giữ tiếng Anh khi dùng ứng dụng đồ họa (Photoshop, AutoCAD...) hoặc game.", C_BLACKLIST_TOGGLE, prefs::isBlacklistEnabled());
+    HWND btnBlacklist = row(L"Danh sách loại trừ", L"Quản lý danh sách các ứng dụng và game tự động chuyển sang tiếng Anh.", L"VikeyButton", C_BLACKLIST_BTN, 130, 26, WS_TABSTOP);
+    SetWindowTextW(btnBlacklist, L"Quản lý danh sách…"); setBg(btnBlacklist, GROUP);
     endGroup();
     beginGroup(nullptr);
     bool emojiOn = prefs::getInt(L"EmojiPicker", 0) != 0;
@@ -415,6 +425,7 @@ static void buildMain() {
     endGroup();
     beginGroup(nullptr);
     toggleRow(L"Mở HKey khi đăng nhập", L"Tự mở HKey mỗi khi bạn đăng nhập vào Windows.", C_LOGIN, prefs::launchAtLogin());
+    toggleRow(L"Khởi động quyền Admin (Task Scheduler)", L"Tự khởi động cùng Windows với quyền Administrator cao nhất thông qua Task Scheduler, gõ mượt trong Task Manager/CMD Admin mà không bị UAC hỏi mỗi lần mở máy.", C_ADMIN_TASK, prefs::isTaskSchedulerAdminAutostart());
     toggleRow(L"Tự động cập nhật", L"Mỗi ngày HKey kiểm tra bản mới trên GitHub, tự tải về và cài khi bạn thoát HKey hoặc tắt máy.", C_UPDATE, prefs::getInt(L"AutoUpdate", 1) != 0);
     
     endGroup();
@@ -441,12 +452,34 @@ static LRESULT CALLBACK mainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case C_SMART: flag(L"UseSmartSwitchKey"); break;
         case C_SITE: flag(L"SmartSwitchPerSite"); break;
         case C_MARK: if (HIWORD(wp) == CBN_SELCHANGE) { prefs::setInt(L"ModernOrthography", SendMessageW(c, CB_GETCURSEL, 0, 0) == 0 ? 1 : 0); core::reloadSettings(); } break;
+        case C_ROTATION: flag(L"RotationalTone"); break;
         case C_SPELL: flag(L"Spelling"); break;
         case C_RESTORE: flag(L"RestoreIfInvalidWord"); break;
         case C_MACRO: flag(L"UseMacro"); break;
         case C_MACROFILE: macro::openMacroFile(); break;
+        case C_BLACKLIST_TOGGLE: prefs::setBlacklistEnabled(toggleOn(c)); core::reloadSettings(); refreshEnabled(); break;
+        case C_BLACKLIST_BTN: showBlacklistDialog(_win); break;
         case C_EMOJI: prefs::setInt(L"EmojiPicker", toggleOn(c)); core::reloadSettings(); emoji::settingsChanged(); afterHotkeyChange(); break;
-        case C_LOGIN: prefs::setLaunchAtLogin(toggleOn(c)); setToggle(c, prefs::launchAtLogin()); break;
+        case C_LOGIN: {
+            bool on = toggleOn(c);
+            prefs::setLaunchAtLogin(on);
+            if (on && prefs::isTaskSchedulerAdminAutostart()) {
+                prefs::setTaskSchedulerAdminAutostart(false);
+                if (_ctl.count(C_ADMIN_TASK)) setToggle(_ctl[C_ADMIN_TASK], false);
+            }
+            setToggle(c, prefs::launchAtLogin());
+            break;
+        }
+        case C_ADMIN_TASK: {
+            bool on = toggleOn(c);
+            bool ok = prefs::setTaskSchedulerAdminAutostart(on);
+            if (on && ok) {
+                prefs::setLaunchAtLogin(false);
+                if (_ctl.count(C_LOGIN)) setToggle(_ctl[C_LOGIN], false);
+            }
+            setToggle(c, prefs::isTaskSchedulerAdminAutostart());
+            break;
+        }
         case C_UPDATE: prefs::setInt(L"AutoUpdate", toggleOn(c)); break;
         
         }
@@ -812,6 +845,215 @@ void showAbout(HINSTANCE inst) {
     _aboutWin = CreateWindowExW(0, L"HKeyAbout", L"Giới thiệu HKey", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, 0, 0, wr.right - wr.left, wr.bottom - wr.top, nullptr, nullptr, inst, nullptr);
     centerOnMouseScreen(_aboutWin);
     bringToFront(_aboutWin);
+}
+
+// ---- Blacklist window ------------------------------------------------------------------------
+static HWND _blWin = nullptr;
+static HWND _blList = nullptr;
+
+static void loadBlacklistToListBox(HWND lb) {
+    SendMessageW(lb, LB_RESETCONTENT, 0, 0);
+    auto list = prefs::getBlacklist();
+    for (const auto& item : list) {
+        SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)item.c_str());
+    }
+}
+
+static void saveListBoxToBlacklist(HWND lb) {
+    std::vector<std::wstring> list;
+    LRESULT count = SendMessageW(lb, LB_GETCOUNT, 0, 0);
+    for (int i = 0; i < count; i++) {
+        wchar_t buf[MAX_PATH] = {0};
+        SendMessageW(lb, LB_GETTEXT, i, (LPARAM)buf);
+        if (buf[0]) list.push_back(buf);
+    }
+    prefs::setBlacklist(list);
+    core::reloadSettings();
+}
+
+static LRESULT CALLBACK blacklistProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp);
+        switch (id) {
+        case BL_ADD_RUNNING: {
+            std::vector<std::wstring> runningApps;
+            EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                if (!IsWindowVisible(hwnd)) return TRUE;
+                int len = GetWindowTextLengthW(hwnd);
+                if (len == 0) return TRUE;
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hwnd, &pid);
+                if (pid == GetCurrentProcessId()) return TRUE;
+                HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                if (hProcess) {
+                    wchar_t path[MAX_PATH] = {0};
+                    DWORD size = MAX_PATH;
+                    if (QueryFullProcessImageNameW(hProcess, 0, path, &size)) {
+                        std::wstring s(path);
+                        size_t i = s.find_last_of(L"\\/");
+                        std::wstring name = i == std::wstring::npos ? s : s.substr(i + 1);
+                        for (auto& c : name) c = towlower(c);
+                        if (name != L"explorer.exe" && name != L"applicationframehost.exe" &&
+                            name != L"shellexperiencehost.exe" && name != L"searchhost.exe" &&
+                            name != L"systemsettings.exe" && name != L"textinputhost.exe") {
+                            auto* apps = (std::vector<std::wstring>*)lParam;
+                            if (std::find(apps->begin(), apps->end(), name) == apps->end()) {
+                                apps->push_back(name);
+                            }
+                        }
+                    }
+                    CloseHandle(hProcess);
+                }
+                return TRUE;
+            }, (LPARAM)&runningApps);
+
+            std::sort(runningApps.begin(), runningApps.end());
+            if (runningApps.empty()) {
+                MessageBoxW(h, L"Không tìm thấy ứng dụng nào đang chạy.", L"Thông báo", MB_OK | MB_ICONINFORMATION);
+            } else {
+                HMENU menu = CreatePopupMenu();
+                for (size_t i = 0; i < runningApps.size(); i++) {
+                    AppendMenuW(menu, MF_STRING, 1000 + i, runningApps[i].c_str());
+                }
+                HWND btn = GetDlgItem(h, BL_ADD_RUNNING);
+                RECT rc; GetWindowRect(btn, &rc);
+                int sel = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_TOPALIGN | TPM_LEFTALIGN, rc.left, rc.bottom, 0, h, nullptr);
+                DestroyMenu(menu);
+                if (sel >= 1000 && (size_t)(sel - 1000) < runningApps.size()) {
+                    const std::wstring& chosen = runningApps[sel - 1000];
+                    LRESULT count = SendMessageW(_blList, LB_GETCOUNT, 0, 0);
+                    bool found = false;
+                    for (int idx = 0; idx < count; idx++) {
+                        wchar_t buf[MAX_PATH] = {0};
+                        SendMessageW(_blList, LB_GETTEXT, idx, (LPARAM)buf);
+                        if (_wcsicmp(buf, chosen.c_str()) == 0) { found = true; break; }
+                    }
+                    if (!found) {
+                        SendMessageW(_blList, LB_ADDSTRING, 0, (LPARAM)chosen.c_str());
+                        saveListBoxToBlacklist(_blList);
+                    }
+                }
+            }
+            break;
+        }
+        case BL_ADD_FILE: {
+            wchar_t file[MAX_PATH] = {0};
+            OPENFILENAMEW ofn = {sizeof(ofn)};
+            ofn.hwndOwner = h;
+            ofn.lpstrFilter = L"Chương trình (*.exe)\0*.exe\0Tất cả tập tin (*.*)\0*.*\0";
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (GetOpenFileNameW(&ofn)) {
+                std::wstring s(file);
+                size_t i = s.find_last_of(L"\\/");
+                std::wstring name = i == std::wstring::npos ? s : s.substr(i + 1);
+                for (auto& c : name) c = towlower(c);
+                LRESULT count = SendMessageW(_blList, LB_GETCOUNT, 0, 0);
+                bool found = false;
+                for (int idx = 0; idx < count; idx++) {
+                    wchar_t buf[MAX_PATH] = {0};
+                    SendMessageW(_blList, LB_GETTEXT, idx, (LPARAM)buf);
+                    if (_wcsicmp(buf, name.c_str()) == 0) { found = true; break; }
+                }
+                if (!found) {
+                    SendMessageW(_blList, LB_ADDSTRING, 0, (LPARAM)name.c_str());
+                    saveListBoxToBlacklist(_blList);
+                }
+            }
+            break;
+        }
+        case BL_REMOVE: {
+            int sel = (int)SendMessageW(_blList, LB_GETCURSEL, 0, 0);
+            if (sel != LB_ERR) {
+                SendMessageW(_blList, LB_DELETESTRING, sel, 0);
+                saveListBoxToBlacklist(_blList);
+            }
+            break;
+        }
+        case BL_RESET: {
+            if (MessageBoxW(h, L"Đặt lại danh sách loại trừ về mặc định (các ứng dụng game và đồ họa phổ biến)?", L"Xác nhận", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                prefs::setBlacklist({
+                    L"photoshop.exe", L"illustrator.exe", L"acad.exe", L"valorant.exe",
+                    L"league of legends.exe", L"cs2.exe", L"dota2.exe", L"genshinimpact.exe", L"overwatch.exe"
+                });
+                loadBlacklistToListBox(_blList);
+                core::reloadSettings();
+            }
+            break;
+        }
+        case BL_CLOSE:
+            if (_blList) saveListBoxToBlacklist(_blList);
+            DestroyWindow(h);
+            break;
+        }
+        return 0;
+    }
+    case WM_CLOSE:
+        if (_blList) saveListBoxToBlacklist(_blList);
+        DestroyWindow(h);
+        return 0;
+    case WM_DESTROY:
+        _blWin = nullptr;
+        _blList = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+static void showBlacklistDialog(HWND parent) {
+    if (_blWin) { bringToFront(_blWin); return; }
+    HINSTANCE inst = _inst ? _inst : GetModuleHandleW(nullptr);
+    static bool reg = false;
+    if (!reg) {
+        WNDCLASSW wc = {};
+        wc.lpfnWndProc = blacklistProc;
+        wc.hInstance = inst;
+        wc.lpszClassName = L"HKeyBlacklist";
+        wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP));
+        RegisterClassW(&wc);
+        reg = true;
+    }
+    RECT wr = {0, 0, 480, 420};
+    AdjustWindowRectEx(&wr, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, 0);
+    _blWin = CreateWindowExW(0, L"HKeyBlacklist", L"Danh sách loại trừ ứng dụng (Game & Đồ họa)",
+                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                             0, 0, wr.right - wr.left, wr.bottom - wr.top, parent, nullptr, inst, nullptr);
+
+    CreateWindowExW(0, L"STATIC", L"HKey sẽ tự động chuyển sang tiếng Anh khi các ứng dụng dưới đây hoạt động:",
+                    WS_CHILD | WS_VISIBLE | SS_LEFT, 20, 14, 440, 20, _blWin, nullptr, inst, nullptr);
+
+    _blList = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+                              WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | WS_TABSTOP | LBS_SORT,
+                              20, 40, 440, 260, _blWin, (HMENU)BL_LIST, inst, nullptr);
+
+    CreateWindowExW(0, L"BUTTON", L"Thêm app đang chạy…", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                    20, 312, 155, 30, _blWin, (HMENU)BL_ADD_RUNNING, inst, nullptr);
+
+    CreateWindowExW(0, L"BUTTON", L"Chọn file .exe…", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                    185, 312, 125, 30, _blWin, (HMENU)BL_ADD_FILE, inst, nullptr);
+
+    CreateWindowExW(0, L"BUTTON", L"Xóa", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                    320, 312, 60, 30, _blWin, (HMENU)BL_REMOVE, inst, nullptr);
+
+    CreateWindowExW(0, L"BUTTON", L"Mặc định", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                    390, 312, 70, 30, _blWin, (HMENU)BL_RESET, inst, nullptr);
+
+    CreateWindowExW(0, L"BUTTON", L"Đóng", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                    360, 360, 100, 32, _blWin, (HMENU)BL_CLOSE, inst, nullptr);
+
+    HFONT hFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    EnumChildWindows(_blWin, [](HWND child, LPARAM lpFont) -> BOOL {
+        SendMessageW(child, WM_SETFONT, (WPARAM)lpFont, TRUE);
+        return TRUE;
+    }, (LPARAM)hFont);
+
+    loadBlacklistToListBox(_blList);
+    centerOnMouseScreen(_blWin);
+    bringToFront(_blWin);
 }
 
 // ---- typing log window ------------------------------------------------------------------------

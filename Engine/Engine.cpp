@@ -32,6 +32,7 @@ static vector<Uint8> _breakCode = {
 
 
 //Telex keys: tones s f r x j, doubled a o e (circumflex), w (horn/breve), d (đ), z (remove tone)
+int vRotationalTone = 1;
 static const Uint16 TelexKey[11] = {KEY_S, KEY_F, KEY_R, KEY_X, KEY_J, KEY_A, KEY_O, KEY_E, KEY_W, KEY_D, KEY_Z};
 
 #define IS_KEY_Z(key) (TelexKey[10] == key)
@@ -761,7 +762,11 @@ void insertMark(const Uint32& markMask, const bool& canModifyFlag) {
             hData[kk--] = GET(TypingWord[ii]);
         }
         //_index = 0;
-        tempDisableKey = true;
+        hBPC = _index - VSI;
+        if (!vRotationalTone)
+            tempDisableKey = true;
+        else
+            tempDisableKey = false;
     } else {
         //remove other mark
         TypingWord[VWSM] &= ~MARK_MASK;
@@ -1067,6 +1072,41 @@ void handleMainKey(const Uint16& data, const bool& isCaps) {
     
     //if is mark key
     if (IS_MARK_KEY(data)) {
+        if (vRotationalTone) {
+            int existingMarkVowel = -1;
+            Uint32 existingMark = 0;
+            for (int m = 0; m < _index; m++) {
+                if (TypingWord[m] & MARK_MASK) {
+                    existingMarkVowel = m;
+                    existingMark = TypingWord[m] & MARK_MASK;
+                    break;
+                }
+            }
+            if (existingMarkVowel != -1) {
+                Uint32 newMark = 0;
+                if (IS_KEY_S(data)) newMark = MARK1_MASK;
+                else if (IS_KEY_F(data)) newMark = MARK2_MASK;
+                else if (IS_KEY_R(data)) newMark = MARK3_MASK;
+                else if (IS_KEY_X(data)) newMark = MARK4_MASK;
+                else if (IS_KEY_J(data)) newMark = MARK5_MASK;
+
+                if (newMark != 0) {
+                    if (newMark == existingMark) {
+                        insertMark(newMark);
+                        tempDisableKey = false;
+                        return;
+                    } else {
+                        for (int m = 0; m < _index; m++) {
+                            TypingWord[m] &= ~MARK_MASK;
+                        }
+                        insertMark(newMark);
+                        tempDisableKey = false;
+                        return;
+                    }
+                }
+            }
+        }
+
         for (auto& vowelEntry : _vowelForMark) {
             vector<vector<Uint16>>& charset = vowelEntry.second;
             isCorect = false;

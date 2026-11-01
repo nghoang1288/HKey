@@ -22,6 +22,17 @@ std::wstring appDataDir();
 bool launchAtLogin();
 void setLaunchAtLogin(bool on);
 
+/// Task Scheduler autostart as Administrator (no UAC prompt on logon)
+bool isTaskSchedulerAdminAutostart();
+bool setTaskSchedulerAdminAutostart(bool on);
+
+/// Blacklist / Game mode
+bool isBlacklistEnabled();
+void setBlacklistEnabled(bool on);
+std::vector<std::wstring> getBlacklist();
+void setBlacklist(const std::vector<std::wstring>& list);
+bool isAppBlacklisted(const std::wstring& exeName);
+
 /// Settings migration (OpenKey / Vikey)
 void migrateFromOpenKey();
 

@@ -64,6 +64,7 @@ extern int vCheckSpelling;
  * 1: oà uý
 */
 extern int vUseModernOrthography;
+extern int vRotationalTone;
 
 /**
  * Work together with vCheckSpelling

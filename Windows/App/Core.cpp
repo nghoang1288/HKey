@@ -66,6 +66,8 @@ static std::wstring _siteHost;                    // host of the browser tab in 
 static bool _otherInputLanguage = false;          // Japanese/Chinese IME layout active
 static int _languageTemp = 0;
 static std::vector<Byte> savedSmartSwitchKeyData;
+static bool _isBlacklistActive = false;
+static int _savedLangBeforeBlacklist = 1;
 
 // ---- Auto switch by typing (same state machine as VikeyCore.mm) --------------------------
 static Uint32 _enKeys[MAX_BUFF];
@@ -237,7 +239,21 @@ void onForegroundChanged() {
     _siteHost.clear(); macro::reset();
     ResetEnglishWord(true); _autoFixUndo.active = false;
     TLEndWord("app"); _tlApp = _frontApp;
-    if (vUseSmartSwitchKey) ApplySmartSwitch();
+
+    if (prefs::isBlacklistEnabled() && prefs::isAppBlacklisted(_frontApp)) {
+        if (!_isBlacklistActive) {
+            _savedLangBeforeBlacklist = vLanguage;
+            _isBlacklistActive = true;
+            setLanguageQuiet(0);
+        }
+    } else {
+        if (_isBlacklistActive) {
+            _isBlacklistActive = false;
+            setLanguageQuiet(_savedLangBeforeBlacklist);
+        } else if (vUseSmartSwitchKey) {
+            ApplySmartSwitch();
+        }
+    }
     startNewSession();
 }
 void onSiteChanged(const std::wstring& host) {
@@ -282,6 +298,7 @@ void reloadSettings() {
     vCheckSpelling = prefs::getInt(L"Spelling", 1); vSetCheckSpelling();
     vRestoreIfWrongSpelling = prefs::getInt(L"RestoreIfInvalidWord", 1);
     vUseModernOrthography = prefs::getInt(L"ModernOrthography", 1);
+    vRotationalTone = prefs::getInt(L"RotationalTone", 1);
     vUseSmartSwitchKey = prefs::getInt(L"UseSmartSwitchKey", 1);
     vAutoSwitchByTyping = AutoSwitchPaused() ? 0 : prefs::getInt(L"AutoSwitchByTyping", 1);
     vTypingLogKeys = prefs::getInt(L"TypingLogKeys", 1);
@@ -582,7 +599,7 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
     }
 
     if (vLanguage == 0) {
-        if (vAutoSwitchByTyping && HandleEnglishKeyForAutoSwitch()) return 1;
+        if (!_isBlacklistActive && vAutoSwitchByTyping && HandleEnglishKeyForAutoSwitch()) return 1;
         return CallNextHookEx(_kbHook, nCode, wParam, lParam);
     }
     if (vOtherLanguage && (_otherInputLanguage || imeComposing())) return CallNextHookEx(_kbHook, nCode, wParam, lParam);
