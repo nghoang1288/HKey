@@ -98,76 +98,19 @@ void setLaunchAtLogin(bool on) {
     RegCloseKey(h);
 }
 
-static const wchar_t* TASK_NAME = L"HKeyAutoStartAdmin";
-
-bool isTaskSchedulerAdminAutostart() {
-    int regVal = getInt(L"RunAsAdminTask", -1);
-    std::wstring cmd = L"schtasks.exe /Query /TN \"" + std::wstring(TASK_NAME) + L"\"";
-    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
-    cmdBuf.push_back(0);
-    STARTUPINFOW si = {sizeof(si)};
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi = {};
-    bool exists = false;
-    if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        DWORD waitRes = WaitForSingleObject(pi.hProcess, 1500);
-        DWORD exitCode = 1;
-        if (waitRes == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == 0) {
-            exists = true;
-        } else if (waitRes == WAIT_TIMEOUT) {
-            TerminateProcess(pi.hProcess, 1);
+void cleanupLegacyAdminTask() {
+    if (has(L"RunAsAdminTask")) {
+        remove(L"RunAsAdminTask");
+        STARTUPINFOW si = {sizeof(si)};
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = {};
+        wchar_t cmd[] = L"schtasks.exe /Delete /TN \"HKeyAutoStartAdmin\" /F";
+        if (CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 1500);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
         }
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-    } else if (regVal == 1) {
-        exists = true;
-    }
-    return exists;
-}
-
-bool setTaskSchedulerAdminAutostart(bool on) {
-    if (on) {
-        wchar_t exe[MAX_PATH];
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        // Note: schtasks /Create /TR requires single quotes inside double quotes when path has spaces
-        std::wstring params = L"/Create /TN \"" + std::wstring(TASK_NAME) + L"\" /TR \"'" + exe + L"'\" /SC ONLOGON /RL HIGHEST /F";
-
-        SHELLEXECUTEINFOW sei = {sizeof(sei)};
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-        sei.lpVerb = L"runas";
-        sei.lpFile = L"schtasks.exe";
-        sei.lpParameters = params.c_str();
-        sei.nShow = SW_HIDE;
-
-        if (ShellExecuteExW(&sei) && sei.hProcess) {
-            WaitForSingleObject(sei.hProcess, 5000);
-            DWORD exitCode = 1;
-            GetExitCodeProcess(sei.hProcess, &exitCode);
-            CloseHandle(sei.hProcess);
-            if (exitCode == 0) {
-                setLaunchAtLogin(false);
-                setInt(L"RunAsAdminTask", 1);
-                return true;
-            }
-        }
-        return false;
-    } else {
-        std::wstring params = L"/Delete /TN \"" + std::wstring(TASK_NAME) + L"\" /F";
-
-        SHELLEXECUTEINFOW sei = {sizeof(sei)};
-        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-        sei.lpVerb = L"runas";
-        sei.lpFile = L"schtasks.exe";
-        sei.lpParameters = params.c_str();
-        sei.nShow = SW_HIDE;
-
-        if (ShellExecuteExW(&sei) && sei.hProcess) {
-            WaitForSingleObject(sei.hProcess, 5000);
-            CloseHandle(sei.hProcess);
-        }
-        setInt(L"RunAsAdminTask", 0);
-        return true;
     }
 }
 
@@ -232,6 +175,7 @@ bool isAppBlacklisted(const std::wstring& exeName) {
 }
 
 void migrateFromOpenKey() {
+    cleanupLegacyAdminTask();
     if (has(L"MigratedFromPrevious")) return;
     setInt(L"MigratedFromPrevious", 1);
 

@@ -319,7 +319,7 @@ static void destroyChildren(HWND h) { std::vector<HWND> kids; for (HWND c = GetW
 
 // ---- main window -----------------------------------------------------------------------------
 enum { C_SEG = 200, C_HOTKEY, C_BEEP, C_AUTO, C_PAUSE, C_SMART, C_SITE, C_MARK, C_SPELL, C_RESTORE, C_MACRO, C_MACROFILE, C_LOGIN, C_UPDATE, C_LOGKEYS, C_EMOJI, C_EMOJIKEY,
-       C_ROTATION, C_BLACKLIST_TOGGLE, C_BLACKLIST_BTN, C_ADMIN_TASK,
+       C_ROTATION, C_BLACKLIST_TOGGLE, C_BLACKLIST_BTN,
        BL_LIST = 280, BL_ADD_RUNNING, BL_ADD_FILE, BL_REMOVE, BL_RESET, BL_CLOSE,
        L_REFRESH = 300, L_OPEN, L_CLEAR, A_LINK = 400, O_BACK = 500, O_NEXT, O_REC, O_BEEP, O_EMOJI, O_EMOJIKEY, O_EDIT = 520 };
 static void showBlacklistDialog(HWND parent);
@@ -425,7 +425,6 @@ static void buildMain() {
     endGroup();
     beginGroup(nullptr);
     toggleRow(L"Mở HKey khi đăng nhập", L"Tự mở HKey mỗi khi bạn đăng nhập vào Windows.", C_LOGIN, prefs::launchAtLogin());
-    toggleRow(L"Khởi động quyền Admin (Task Scheduler)", L"Tự khởi động cùng Windows với quyền Administrator cao nhất thông qua Task Scheduler, gõ mượt trong Task Manager/CMD Admin mà không bị UAC hỏi mỗi lần mở máy.", C_ADMIN_TASK, prefs::isTaskSchedulerAdminAutostart());
     toggleRow(L"Tự động cập nhật", L"Mỗi ngày HKey kiểm tra bản mới trên GitHub, tự tải về và cài khi bạn thoát HKey hoặc tắt máy.", C_UPDATE, prefs::getInt(L"AutoUpdate", 1) != 0);
     
     endGroup();
@@ -460,26 +459,7 @@ static LRESULT CALLBACK mainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case C_BLACKLIST_TOGGLE: prefs::setBlacklistEnabled(toggleOn(c)); core::reloadSettings(); refreshEnabled(); break;
         case C_BLACKLIST_BTN: showBlacklistDialog(_win); break;
         case C_EMOJI: prefs::setInt(L"EmojiPicker", toggleOn(c)); core::reloadSettings(); emoji::settingsChanged(); afterHotkeyChange(); break;
-        case C_LOGIN: {
-            bool on = toggleOn(c);
-            prefs::setLaunchAtLogin(on);
-            if (on && prefs::isTaskSchedulerAdminAutostart()) {
-                prefs::setTaskSchedulerAdminAutostart(false);
-                if (_ctl.count(C_ADMIN_TASK)) setToggle(_ctl[C_ADMIN_TASK], false);
-            }
-            setToggle(c, prefs::launchAtLogin());
-            break;
-        }
-        case C_ADMIN_TASK: {
-            bool on = toggleOn(c);
-            bool ok = prefs::setTaskSchedulerAdminAutostart(on);
-            if (on && ok) {
-                prefs::setLaunchAtLogin(false);
-                if (_ctl.count(C_LOGIN)) setToggle(_ctl[C_LOGIN], false);
-            }
-            setToggle(c, prefs::isTaskSchedulerAdminAutostart());
-            break;
-        }
+        case C_LOGIN: prefs::setLaunchAtLogin(toggleOn(c)); setToggle(c, prefs::launchAtLogin()); break;
         case C_UPDATE: prefs::setInt(L"AutoUpdate", toggleOn(c)); break;
         
         }

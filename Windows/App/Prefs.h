@@ -22,10 +22,6 @@ std::wstring appDataDir();
 bool launchAtLogin();
 void setLaunchAtLogin(bool on);
 
-/// Task Scheduler autostart as Administrator (no UAC prompt on logon)
-bool isTaskSchedulerAdminAutostart();
-bool setTaskSchedulerAdminAutostart(bool on);
-
 /// Blacklist / Game mode
 bool isBlacklistEnabled();
 void setBlacklistEnabled(bool on);

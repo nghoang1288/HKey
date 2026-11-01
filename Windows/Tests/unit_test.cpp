@@ -167,20 +167,6 @@ int main() {
     assert(isAppBlacklisted(L"photoshop.exe"));
     printf("[PASS] Blacklist enable/disable toggle working\n");
 
-    // Test 4: Task Scheduler Autostart query check and quote validation
-    printf("\n--- Test 4: Task Scheduler Autostart Check & Quote Formatting ---\n");
-    bool tsAdmin = isTaskSchedulerAdminAutostart();
-    printf("[PASS] isTaskSchedulerAdminAutostart() queried without crash: %s\n", tsAdmin ? "true" : "false");
-
-    // Validate schtasks /TR quote format for paths with spaces
-    {
-        std::wstring testPathWithSpaces = L"E:\\Code linh tinh\\Hkey\\Windows\\dist\\HKey.exe";
-        std::wstring expectedParam = L"/Create /TN \"HKeyAutoStartAdmin\" /TR \"'" + testPathWithSpaces + L"'\" /SC ONLOGON /RL HIGHEST /F";
-        assert(expectedParam.find(L"/TR \"'E:\\Code linh tinh") != std::wstring::npos);
-        assert(expectedParam.find(L"\\\"\"") == std::wstring::npos); // Ensure buggy inner escaped quotes are gone
-        printf("[PASS] Task Scheduler command line correctly formatted with outer double and inner single quotes: %ls\n", expectedParam.c_str());
-    }
-
     printf("\n===================================\n");
     if (failed == 0) {
         printf("ALL TESTS PASSED SUCCESSFULLY! (0 failures)\n");
