@@ -11,9 +11,11 @@
 int vLanguage = 1, vSwitchKeyStatus = 0, vCheckSpelling = 1, vUseModernOrthography = 1, vRestoreIfWrongSpelling = 1,
     vFixRecommendBrowser = 1, vUseSmartSwitchKey = 1, vOtherLanguage = 1, vAutoSwitchByTyping = 0;
 
-static Uint16 K(char c) {
+static Uint16 K(char c, bool& isCaps) {
     static const Uint16 L[26] = {KEY_A,KEY_B,KEY_C,KEY_D,KEY_E,KEY_F,KEY_G,KEY_H,KEY_I,KEY_J,KEY_K,KEY_L,KEY_M,KEY_N,KEY_O,KEY_P,KEY_Q,KEY_R,KEY_S,KEY_T,KEY_U,KEY_V,KEY_W,KEY_X,KEY_Y,KEY_Z};
-    return c == ' ' ? KEY_SPACE : c == '<' ? KEY_DELETE : L[c - 'a'];
+    if (c >= 'A' && c <= 'Z') { isCaps = true; return L[c - 'A']; }
+    isCaps = false;
+    return c == ' ' ? KEY_SPACE : c == '<' ? KEY_DELETE : (c >= 'a' && c <= 'z' ? L[c - 'a'] : 0);
 }
 
 static std::string typeWithRotational(const char* keys, int rotational) {
@@ -23,7 +25,9 @@ static std::string typeWithRotational(const char* keys, int rotational) {
     d.resetContext();
     std::u16string t;
     for (const char* p = keys; *p; p++) {
-        VKEdit e = d.press(K(*p), false, 0);
+        bool isCaps = false;
+        Uint16 code = K(*p, isCaps);
+        VKEdit e = d.press(code, isCaps, 0);
         for (int i = 0; i < e.deleteCount && !t.empty(); i++) t.pop_back();
         t += e.text;
     }
@@ -71,6 +75,10 @@ int main() {
         {"hoasf", "hoà"},
         {"thuyrs", "thuý"},
         {"thuyrsf", "thuỳ"},
+        {"TOAS", "TOÁ"},
+        {"TOASF", "TOÀ"},
+        {"Toas", "Toá"},
+        {"Toasf", "Toà"},
     };
 
     for (const auto& c : rotCases) {
@@ -159,10 +167,19 @@ int main() {
     assert(isAppBlacklisted(L"photoshop.exe"));
     printf("[PASS] Blacklist enable/disable toggle working\n");
 
-    // Test 4: Task Scheduler Autostart query check
-    printf("\n--- Test 4: Task Scheduler Autostart Check ---\n");
+    // Test 4: Task Scheduler Autostart query check and quote validation
+    printf("\n--- Test 4: Task Scheduler Autostart Check & Quote Formatting ---\n");
     bool tsAdmin = isTaskSchedulerAdminAutostart();
     printf("[PASS] isTaskSchedulerAdminAutostart() queried without crash: %s\n", tsAdmin ? "true" : "false");
+
+    // Validate schtasks /TR quote format for paths with spaces
+    {
+        std::wstring testPathWithSpaces = L"E:\\Code linh tinh\\Hkey\\Windows\\dist\\HKey.exe";
+        std::wstring expectedParam = L"/Create /TN \"HKeyAutoStartAdmin\" /TR \"'" + testPathWithSpaces + L"'\" /SC ONLOGON /RL HIGHEST /F";
+        assert(expectedParam.find(L"/TR \"'E:\\Code linh tinh") != std::wstring::npos);
+        assert(expectedParam.find(L"\\\"\"") == std::wstring::npos); // Ensure buggy inner escaped quotes are gone
+        printf("[PASS] Task Scheduler command line correctly formatted with outer double and inner single quotes: %ls\n", expectedParam.c_str());
+    }
 
     printf("\n===================================\n");
     if (failed == 0) {

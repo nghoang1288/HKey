@@ -863,9 +863,11 @@ static void saveListBoxToBlacklist(HWND lb) {
     std::vector<std::wstring> list;
     LRESULT count = SendMessageW(lb, LB_GETCOUNT, 0, 0);
     for (int i = 0; i < count; i++) {
-        wchar_t buf[MAX_PATH] = {0};
-        SendMessageW(lb, LB_GETTEXT, i, (LPARAM)buf);
-        if (buf[0]) list.push_back(buf);
+        int len = (int)SendMessageW(lb, LB_GETTEXTLEN, i, 0);
+        if (len <= 0) continue;
+        std::vector<wchar_t> buf(len + 1, 0);
+        SendMessageW(lb, LB_GETTEXT, i, (LPARAM)buf.data());
+        if (buf[0]) list.push_back(buf.data());
     }
     prefs::setBlacklist(list);
     core::reloadSettings();
@@ -925,9 +927,11 @@ static LRESULT CALLBACK blacklistProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     LRESULT count = SendMessageW(_blList, LB_GETCOUNT, 0, 0);
                     bool found = false;
                     for (int idx = 0; idx < count; idx++) {
-                        wchar_t buf[MAX_PATH] = {0};
-                        SendMessageW(_blList, LB_GETTEXT, idx, (LPARAM)buf);
-                        if (_wcsicmp(buf, chosen.c_str()) == 0) { found = true; break; }
+                        int len = (int)SendMessageW(_blList, LB_GETTEXTLEN, idx, 0);
+                        if (len <= 0) continue;
+                        std::vector<wchar_t> buf(len + 1, 0);
+                        SendMessageW(_blList, LB_GETTEXT, idx, (LPARAM)buf.data());
+                        if (_wcsicmp(buf.data(), chosen.c_str()) == 0) { found = true; break; }
                     }
                     if (!found) {
                         SendMessageW(_blList, LB_ADDSTRING, 0, (LPARAM)chosen.c_str());
@@ -953,9 +957,11 @@ static LRESULT CALLBACK blacklistProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 LRESULT count = SendMessageW(_blList, LB_GETCOUNT, 0, 0);
                 bool found = false;
                 for (int idx = 0; idx < count; idx++) {
-                    wchar_t buf[MAX_PATH] = {0};
-                    SendMessageW(_blList, LB_GETTEXT, idx, (LPARAM)buf);
-                    if (_wcsicmp(buf, name.c_str()) == 0) { found = true; break; }
+                    int len = (int)SendMessageW(_blList, LB_GETTEXTLEN, idx, 0);
+                    if (len <= 0) continue;
+                    std::vector<wchar_t> buf(len + 1, 0);
+                    SendMessageW(_blList, LB_GETTEXT, idx, (LPARAM)buf.data());
+                    if (_wcsicmp(buf.data(), name.c_str()) == 0) { found = true; break; }
                 }
                 if (!found) {
                     SendMessageW(_blList, LB_ADDSTRING, 0, (LPARAM)name.c_str());

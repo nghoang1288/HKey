@@ -11,6 +11,7 @@ bool start();                       // install hooks (needs a message loop on th
 void stop();
 bool isRunning();
 int language();                     // 0 English, 1 Vietnamese
+bool isBlacklistActive();           // true if front app is currently blacklisted
 void setLanguageByUser(int lang);   // from the tray menu / settings window
 void setLanguageQuiet(int lang);    // tests: set the language without the 5 s pause or a log entry
 void reloadSettings();              // after a setting changed in the registry

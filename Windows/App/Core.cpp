@@ -384,6 +384,7 @@ void setLanguageQuiet(int lang) {
     vLanguage = lang ? 1 : 0; VKLanguageChanged(false); startNewSession();
 }
 int language() { return vLanguage; }
+bool isBlacklistActive() { return _isBlacklistActive; }
 void setLanguageObserver(std::function<void(int)> f) { _observer = f; }
 
 // ---- Emoji picker (Settings.cpp) ------------------------------------------------------------
@@ -547,6 +548,12 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
         return 1;
     }
     if (_keycode == KEY_EMPTY) return CallNextHookEx(_kbHook, nCode, wParam, lParam);   // F-keys, media keys...
+
+    // Blacklisted apps (Game Mode): completely pass through keys without intercepting hotkeys or macros
+    if (_isBlacklistActive) {
+        _lastFlag = 0;
+        return CallNextHookEx(_kbHook, nCode, wParam, lParam);
+    }
 
     // switch language hotkey
     if (GET_SWITCH_KEY(vSwitchKeyStatus) != _keycode) _lastFlag = 0;
