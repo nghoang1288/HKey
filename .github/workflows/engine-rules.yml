@@ -1,0 +1,32 @@
+name: Engine rules
+# Locks down the typing engine: every decided rule (DECISIONS.md) has tagged test cases,
+# plus golden snapshots of typing a mixed Vietnamese/English corpus and every syllable.
+on:
+  push:
+  pull_request:
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rules, golden snapshots, Telex lock, metrics
+        run: zsh Tools/autoswitch/check.sh
+  app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the Vikey app
+        run: |
+          brew install xcodegen
+          xcodegen generate
+          xcodebuild -project Vikey.xcodeproj -scheme Vikey -configuration Release CODE_SIGNING_ALLOWED=NO build
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: iOS keyboard tests (correctness + performance lock)
+        run: |
+          brew install xcodegen
+          cd iOS && xcodegen generate
+          SIM=$(xcrun simctl list devices available | grep -E "iPhone" | head -1 | grep -oE "[0-9A-F-]{36}")
+          xcodebuild test -project VikeyiOS.xcodeproj -scheme Vikey -destination "id=$SIM" CODE_SIGNING_ALLOWED=NO

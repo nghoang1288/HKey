@@ -1,0 +1,13 @@
+.DS_Store
+*.exe
+*.obj
+*.o
+*.a
+*.zip
+build/
+Windows/build/
+Windows/dist/
+Windows/installer/out/
+Windows/Tests/*.exe
+Windows/Tests/*.out
+Windows/Tests/macro.txt

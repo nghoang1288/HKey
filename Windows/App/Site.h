@@ -1,0 +1,20 @@
+// Per-website memory: the host of the active tab of the browser in front, read through UI Automation.
+#pragma once
+#include <windows.h>
+#include <string>
+
+namespace vikey { namespace site {
+bool isBrowser(const std::wstring& exe);
+/// Reads the address bar of the foreground browser; empty when not a browser or no URL.
+std::wstring currentHost();
+/// Call every second while a browser is in front (and shortly after clicks / tab shortcuts).
+void poll();
+/// True while a password field has the focus (checked by poll()).
+bool focusedIsPassword();
+/// Re-checks the focused control now (call on focus changes; poll() does it too).
+void pollPassword();
+}}
+
+namespace hkey { namespace site {
+    using namespace vikey::site;
+}}
