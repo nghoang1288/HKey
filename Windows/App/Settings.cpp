@@ -294,7 +294,7 @@ static LRESULT CALLBACK tipProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         Graphics g(dc); g.SetSmoothingMode(SmoothingModeAntiAlias); Pen p(gp(RGB(170, 170, 175)), 1.2f); g.DrawEllipse(&p, 1.5f, 1.5f, 13.0f, 13.0f);
         SelectObject(dc, fSmall); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(150, 150, 155)); RECT r = {0, -1, 16, 16}; DrawTextW(dc, L"?", 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         EndPaint(h, &ps); return 0; }
-    case WM_LBUTTONUP: { wchar_t t[512]; GetWindowTextW(h, t, 512); MessageBoxW(GetParent(h), t, L"Vikey", MB_OK | MB_ICONINFORMATION); return 0; }
+    case WM_LBUTTONUP: { wchar_t t[512]; GetWindowTextW(h, t, 512); MessageBoxW(GetParent(h), t, L"HKey", MB_OK | MB_ICONINFORMATION); return 0; }
     case WM_ERASEBKGND: return 1;
     }
     return DefWindowProcW(h, m, w, l);
@@ -498,8 +498,8 @@ void languageChanged(int lang) {
 }
 
 void showSettings(HINSTANCE inst, bool firstRun) {
+    (void)firstRun;
     _inst = inst; initLook(); registerClasses(inst);
-    if (firstRun) { showOnboarding(inst); return; }
     if (_win) { bringToFront(_win); return; }
     static bool reg = false;
     if (!reg) { WNDCLASSW wc = {}; wc.lpfnWndProc = mainProc; wc.hInstance = inst; wc.lpszClassName = L"HKeyMain"; wc.hbrBackground = nullptr; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_APP)); RegisterClassW(&wc); reg = true; }
@@ -616,7 +616,7 @@ static void paintOnboarding(HWND h) {
     auto label = [&](const wchar_t* t, int x, int y, int hgt, COLORREF c = TEXT, HFONT f = nullptr) { SelectObject(mem, f ? f : fBody); SetTextColor(mem, c); RECT r = {x, y, OW - OP, y + hgt}; DrawTextW(mem, t, -1, &r, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX); };
     switch (_step) {
     case S_WELCOME: {
-        title(L"Vikey dùng kiểu gõ Telex", _oy[0]);
+        title(L"HKey dùng kiểu gõ Telex", _oy[0]);
         para(L"HKey chỉ hỗ trợ Telex, kiểu gõ phổ biến nhất. Bạn gõ tiếng Anh bình thường, HKey tự nhận ra và không bỏ dấu nhầm.", _oy[1], 60);
         static const wchar_t* T[4][4][2] = {{{L"aa", L"â"}, {L"aw", L"ă"}, {L"ee", L"ê"}, {L"oo", L"ô"}}, {{L"ow", L"ơ"}, {L"uw", L"ư"}, {L"dd", L"đ"}, {L"w", L"ư"}},
                                             {{L"s", L"sắc"}, {L"f", L"huyền"}, {L"r", L"hỏi"}, {L"x", L"ngã"}}, {{L"j", L"nặng"}, {L"z", L"xoá dấu"}, {nullptr, nullptr}, {nullptr, nullptr}}};

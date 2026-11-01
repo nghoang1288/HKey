@@ -159,7 +159,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     if (!hkey::prefs::has(L"Onboarded")) {
         hkey::prefs::setInt(L"Onboarded", 1);
-        hkey::ui::showOnboarding(inst);
     }
 
     MSG msg;
