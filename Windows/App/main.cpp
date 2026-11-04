@@ -26,6 +26,7 @@ enum { ID_VIET = 100, ID_ENG, ID_SETTINGS, ID_AUTOSWITCH, ID_MACROTOGGLE, ID_UPD
 
 static HWND _hwnd; static NOTIFYICONDATAW _nid = {};
 static HICON _iconV, _iconE;
+static bool _justDblClick = false;
 
 /// Draws the menu-bar glyph: a rounded square with a V or E cut out
 static HICON makeIcon(wchar_t letter, bool dark) {
@@ -96,8 +97,19 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     using namespace hkey;
     switch (msg) {
     case WM_TRAY:
-        if (LOWORD(lp) == WM_LBUTTONUP) ui::showSettings(GetModuleHandleW(nullptr), false);
-        else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) showMenu();
+        if (LOWORD(lp) == WM_LBUTTONUP) {
+            if (_justDblClick) {
+                _justDblClick = false;
+            } else {
+                core::setLanguageByUser(!core::language());
+            }
+        } else if (LOWORD(lp) == WM_LBUTTONDBLCLK) {
+            _justDblClick = true;
+            core::setLanguageByUser(!core::language());
+            ui::showSettings(GetModuleHandleW(nullptr), false);
+        } else if (LOWORD(lp) == WM_RBUTTONUP || LOWORD(lp) == WM_CONTEXTMENU) {
+            showMenu();
+        }
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
@@ -135,7 +147,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     hkey::prefs::migrateFromOpenKey();
     hkey::updater::installPendingAtLaunch();
 
-    WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = inst; wc.lpszClassName = L"HKeyTray";
+    WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = inst; wc.lpszClassName = L"HKeyTray"; wc.style = CS_DBLCLKS;
     RegisterClassW(&wc);
     _hwnd = CreateWindowExW(0, L"HKeyTray", L"HKey", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
 
