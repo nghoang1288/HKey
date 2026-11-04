@@ -3,6 +3,8 @@
 #include "Engine.h"
 #include "Driver.h"
 #include "Prefs.h"
+#include "Core.h"
+#include "AutoCap.h"
 #include <cstdio>
 #include <cassert>
 #include <string>
@@ -166,6 +168,143 @@ int main() {
     setBlacklistEnabled(true);
     assert(isAppBlacklisted(L"photoshop.exe"));
     printf("[PASS] Blacklist enable/disable toggle working\n");
+
+    // Test 4: Terminal and Electron App Detection
+    printf("\n--- Test 4: Terminal and Electron App Detection ---\n");
+    using namespace vikey::core;
+    assert(isTerminalOrElectronApp(L"code.exe"));
+    assert(isTerminalOrElectronApp(L"Code.exe"));
+    assert(isTerminalOrElectronApp(L"C:\\Users\\User\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"));
+    assert(isTerminalOrElectronApp(L"cursor.exe"));
+    assert(isTerminalOrElectronApp(L"Cursor.exe"));
+    assert(isTerminalOrElectronApp(L"windowsterminal.exe"));
+    assert(isTerminalOrElectronApp(L"WindowsTerminal.exe"));
+    assert(isTerminalOrElectronApp(L"cmd.exe"));
+    assert(isTerminalOrElectronApp(L"powershell.exe"));
+    assert(isTerminalOrElectronApp(L"pwsh.exe"));
+    assert(isTerminalOrElectronApp(L"alacritty.exe"));
+    assert(isTerminalOrElectronApp(L"wezterm-gui.exe"));
+    assert(isTerminalOrElectronApp(L"ghostty.exe"));
+    assert(isTerminalOrElectronApp(L"idea64.exe"));
+    assert(isTerminalOrElectronApp(L"pycharm64.exe"));
+    assert(!isTerminalOrElectronApp(L"notepad.exe"));
+    assert(!isTerminalOrElectronApp(L"word.exe"));
+    assert(!isTerminalOrElectronApp(L"chrome.exe"));
+    assert(!isTerminalOrElectronApp(L"photoshop.exe"));
+    assert(!isTerminalOrElectronApp(L""));
+    printf("[PASS] Terminal and Electron apps detected accurately\n");
+
+    // Test 5: Terminal Delay and AutoCap Preferences
+    printf("\n--- Test 5: Terminal Delay & AutoCap Prefs ---\n");
+    setTerminalDelayEnabled(1);
+    assert(getTerminalDelayEnabled() == 1);
+    setTerminalDelayMs(20);
+    assert(getTerminalDelayMs() == 20);
+    setTerminalDelayMs(15);
+    assert(getTerminalDelayMs() == 15);
+    setAutoCapitalize(1);
+    assert(getAutoCapitalize() == 1);
+    setAutoCapitalize(0);
+    assert(getAutoCapitalize() == 0);
+    setAutoCapitalize(1);
+    assert(getAutoCapitalize() == 1);
+    printf("[PASS] Terminal Delay & AutoCap Prefs get/set working\n");
+
+    // Test 6: Auto-Capitalization Helper State Machine
+    printf("\n--- Test 6: Auto-Capitalization Helper State Machine ---\n");
+    vikey::AutoCapitalizeHelper ac;
+
+    // Sentence 1: Period + Space + Letter -> AutoCap
+    ac.reset();
+    assert(!ac.processKey(KEY_C, false, false, false)); // 'c'
+    assert(!ac.processKey(KEY_H, false, false, false)); // 'h'
+    assert(!ac.processKey(KEY_A, false, false, false)); // 'a'
+    assert(!ac.processKey(KEY_O, false, false, false)); // 'o'
+    assert(!ac.processKey(KEY_DOT, false, false, false)); // '.'
+    assert(!ac.processKey(KEY_SPACE, false, false, false)); // ' '
+    bool shouldCap1 = ac.processKey(KEY_B, false, false, false); // 'b'
+    assert(shouldCap1); // Should capitalize 'B'
+    printf("[PASS] Period + space + letter auto-capitalizes\n");
+
+    // Follow-up letter in same word should NOT auto-cap
+    assert(!ac.processKey(KEY_A, false, false, false)); // 'a'
+    assert(!ac.processKey(KEY_N, false, false, false)); // 'n'
+
+    // Sentence 2: Question mark + Space + Letter -> AutoCap
+    assert(!ac.processKey(KEY_SLASH, true, false, false)); // '?' (Shift + /)
+    assert(!ac.processKey(KEY_SPACE, false, false, false)); // ' '
+    bool shouldCap2 = ac.processKey(KEY_T, false, false, false); // 't'
+    assert(shouldCap2);
+    printf("[PASS] Question mark + space + letter auto-capitalizes\n");
+
+    // Sentence 3: Exclamation mark + Space + Letter -> AutoCap
+    ac.reset();
+    assert(!ac.processKey(KEY_1, true, false, false)); // '!' (Shift + 1)
+    assert(!ac.processKey(KEY_SPACE, false, false, false)); // ' '
+    assert(ac.processKey(KEY_V, false, false, false)); // 'v'
+    printf("[PASS] Exclamation + space + letter auto-capitalizes\n");
+
+    // Sentence 4: Enter (Newline) -> AutoCap next line
+    ac.reset();
+    assert(!ac.processKey(KEY_RETURN, false, false, false)); // Enter
+    assert(ac.processKey(KEY_H, false, false, false)); // 'h'
+    printf("[PASS] Enter newline auto-capitalizes first letter\n");
+
+    // Sentence 5: Decimal number: 3.14 should NOT capitalize
+    ac.reset();
+    assert(!ac.processKey(KEY_3, false, false, false)); // '3'
+    assert(!ac.processKey(KEY_DOT, false, false, false)); // '.'
+    assert(!ac.processKey(KEY_1, false, false, false)); // '1'
+    assert(!ac.processKey(KEY_4, false, false, false)); // '4'
+    assert(!ac.processKey(KEY_SPACE, false, false, false)); // ' '
+    // After "3.14 ", typing next letter should NOT auto-cap because '.' was followed by '1' (not space)
+    assert(!ac.processKey(KEY_K, false, false, false));
+    printf("[PASS] Decimal number (3.14) does NOT trigger auto-capitalization\n");
+
+    // Sentence 6: Numbered list: "1. " SHOULD auto-cap
+    ac.reset();
+    assert(!ac.processKey(KEY_1, false, false, false)); // '1'
+    assert(!ac.processKey(KEY_DOT, false, false, false)); // '.'
+    assert(!ac.processKey(KEY_SPACE, false, false, false)); // ' '
+    assert(ac.processKey(KEY_D, false, false, false)); // 'd' -> should cap
+    printf("[PASS] Numbered list item (1. ) DOES trigger auto-capitalization\n");
+
+    // Sentence 7: URL / extension: "test.com" should NOT auto-cap
+    ac.reset();
+    assert(!ac.processKey(KEY_T, false, false, false));
+    assert(!ac.processKey(KEY_DOT, false, false, false));
+    assert(!ac.processKey(KEY_C, false, false, false)); // 'c' immediately after dot
+    assert(!ac.processKey(KEY_O, false, false, false));
+    assert(!ac.processKey(KEY_M, false, false, false));
+    printf("[PASS] URL domain (test.com) does NOT auto-capitalize\n");
+
+    // Sentence 8: Abbreviation: "tp. " should NOT auto-cap
+    ac.reset();
+    assert(!ac.processKey(KEY_T, false, false, false)); // 't'
+    assert(!ac.processKey(KEY_P, false, false, false)); // 'p'
+    assert(!ac.processKey(KEY_DOT, false, false, false)); // '.'
+    assert(!ac.processKey(KEY_SPACE, false, false, false)); // ' '
+    assert(!ac.processKey(KEY_H, false, false, false)); // 'h' -> should NOT cap
+    printf("[PASS] Abbreviation (tp. ) does NOT trigger auto-capitalization\n");
+
+    // Sentence 9: Quote after dot: ." Chào
+    ac.reset();
+    assert(!ac.processKey(KEY_DOT, false, false, false)); // '.'
+    assert(!ac.processKey(KEY_QUOTE, true, false, false)); // '"'
+    assert(!ac.processKey(KEY_SPACE, false, false, false)); // ' '
+    assert(ac.processKey(KEY_C, false, false, false)); // 'c' -> should cap
+    printf("[PASS] Punctuation followed by quote (.\" ) auto-capitalizes\n");
+
+    // Sentence 10: Backspace undo auto-cap
+    ac.reset();
+    assert(!ac.processKey(KEY_DOT, false, false, false));
+    assert(!ac.processKey(KEY_SPACE, false, false, false));
+    assert(ac.processKey(KEY_A, false, false, false)); // Auto-capped
+    // User hits Backspace immediately to undo
+    assert(!ac.processKey(KEY_DELETE, false, false, false));
+    // User re-types 'a' lowercase -> should NOT cap again!
+    assert(!ac.processKey(KEY_A, false, false, false));
+    printf("[PASS] Backspace immediate undo cancels auto-capitalization\n");
 
     printf("\n===================================\n");
     if (failed == 0) {

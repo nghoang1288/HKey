@@ -18,6 +18,26 @@ void reloadSettings();              // after a setting changed in the registry
 void onForegroundChanged();         // called by the foreground WinEvent hook
 void onSiteChanged(const std::wstring& host);   // per-site memory (Phase 3)
 std::wstring frontAppName();
+inline bool isTerminalOrElectronApp(const std::wstring& app) {
+    if (app.empty() || app == L"UnknownApp") return false;
+    std::wstring name = app;
+    size_t slash = name.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) name = name.substr(slash + 1);
+    for (auto& c : name) c = (wchar_t)towlower(c);
+
+    static const wchar_t* termApps[] = {
+        L"code.exe", L"cursor.exe", L"windowsterminal.exe", L"openconsole.exe",
+        L"conhost.exe", L"cmd.exe", L"powershell.exe", L"pwsh.exe",
+        L"alacritty.exe", L"wezterm-gui.exe", L"wezterm.exe", L"hyper.exe",
+        L"tabby.exe", L"putty.exe", L"kitty.exe", L"ghostty.exe",
+        L"mintty.exe", L"wsl.exe", L"idea64.exe", L"pycharm64.exe",
+        L"webstorm64.exe", L"clion64.exe"
+    };
+    for (const auto* t : termApps) {
+        if (name == t) return true;
+    }
+    return false;
+}
 
 /// Called on the UI thread whenever the language changes (menu icon, settings window).
 void setLanguageObserver(std::function<void(int)> f);

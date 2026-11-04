@@ -174,6 +174,30 @@ bool isAppBlacklisted(const std::wstring& exeName) {
     return false;
 }
 
+int getTerminalDelayEnabled() {
+    return getInt(L"TerminalDelayEnabled", 1);
+}
+
+void setTerminalDelayEnabled(int mode) {
+    setInt(L"TerminalDelayEnabled", mode);
+}
+
+int getTerminalDelayMs() {
+    return getInt(L"TerminalDelayMs", 15);
+}
+
+void setTerminalDelayMs(int ms) {
+    setInt(L"TerminalDelayMs", ms);
+}
+
+int getAutoCapitalize() {
+    return getInt(L"AutoCapitalize", 1);
+}
+
+void setAutoCapitalize(int on) {
+    setInt(L"AutoCapitalize", on);
+}
+
 void migrateFromOpenKey() {
     cleanupLegacyAdminTask();
     if (has(L"MigratedFromPrevious")) return;

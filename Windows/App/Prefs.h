@@ -29,6 +29,16 @@ std::vector<std::wstring> getBlacklist();
 void setBlacklist(const std::vector<std::wstring>& list);
 bool isAppBlacklisted(const std::wstring& exeName);
 
+/// Terminal & Electron key delay
+int getTerminalDelayEnabled();
+void setTerminalDelayEnabled(int mode);
+int getTerminalDelayMs();
+void setTerminalDelayMs(int ms);
+
+/// Auto capitalization
+int getAutoCapitalize();
+void setAutoCapitalize(int on);
+
 /// Settings migration (OpenKey / Vikey)
 void migrateFromOpenKey();
 

@@ -320,6 +320,7 @@ static void destroyChildren(HWND h) { std::vector<HWND> kids; for (HWND c = GetW
 // ---- main window -----------------------------------------------------------------------------
 enum { C_SEG = 200, C_HOTKEY, C_BEEP, C_AUTO, C_PAUSE, C_SMART, C_SITE, C_MARK, C_SPELL, C_RESTORE, C_MACRO, C_MACROFILE, C_LOGIN, C_UPDATE, C_LOGKEYS, C_EMOJI, C_EMOJIKEY,
        C_ROTATION, C_BLACKLIST_TOGGLE, C_BLACKLIST_BTN,
+       C_AUTOCAP, C_TERMDELAY_TOGGLE, C_TERMDELAY_MS,
        BL_LIST = 280, BL_ADD_RUNNING, BL_ADD_FILE, BL_REMOVE, BL_RESET, BL_CLOSE,
        L_REFRESH = 300, L_OPEN, L_CLEAR, A_LINK = 400, O_BACK = 500, O_NEXT, O_REC, O_BEEP, O_EMOJI, O_EMOJIKEY, O_EDIT = 520 };
 static void showBlacklistDialog(HWND parent);
@@ -362,6 +363,8 @@ static void refreshEnabled() {
     EnableWindow(_ctl[C_SITE], toggleOn(_ctl[C_SMART]));
     EnableWindow(_ctl[C_RESTORE], toggleOn(_ctl[C_SPELL]));
     EnableWindow(_ctl[C_MACROFILE], toggleOn(_ctl[C_MACRO]));
+    EnableWindow(_ctl[C_BLACKLIST_BTN], toggleOn(_ctl[C_BLACKLIST_TOGGLE]));
+    EnableWindow(_ctl[C_TERMDELAY_MS], toggleOn(_ctl[C_TERMDELAY_TOGGLE]));
 }
 static void setHint() { if (_hint) SetWindowTextW(_hint, (L"Bấm " + hotkeyDisplay(currentHotkey()) + L" để chuyển").c_str()); }
 
@@ -404,6 +407,7 @@ static void buildMain() {
     SendMessageW(mark, CB_ADDSTRING, 0, (LPARAM)L"hoà, thuý"); SendMessageW(mark, CB_ADDSTRING, 0, (LPARAM)L"hòa, thúy"); SendMessageW(mark, CB_SETCURSEL, prefs::getInt(L"ModernOrthography", 1) ? 0 : 1, 0);
     SetWindowPos(mark, nullptr, W - MARGIN - 16 - 130, _y - ROW + 4, 130, 200, SWP_NOZORDER);
     toggleRow(L"Bỏ dấu xoay vòng", L"Cho phép đổi dấu thanh tức thì khi gõ phím dấu khác (s, f, r, x, j) mà không cần xóa đi gõ lại.", C_ROTATION, prefs::getInt(L"RotationalTone", 1) != 0);
+    toggleRow(L"Tự động viết hoa đầu câu", L"Tự động viết hoa chữ cái đầu tiên sau dấu chấm (.), hỏi (?), than (!) hoặc khi xuống dòng.", C_AUTOCAP, prefs::getAutoCapitalize() != 0);
     toggleRow(L"Kiểm tra chính tả", L"Chỉ bỏ dấu khi từ đang gõ đúng quy tắc chính tả tiếng Việt.", C_SPELL, prefs::getInt(L"Spelling", 1) != 0);
     toggleRow(L"Trả lại phím khi sai", L"Khi gõ xong một từ sai chính tả tiếng Việt, HKey trả lại đúng các phím bạn đã gõ.", C_RESTORE, prefs::getInt(L"RestoreIfInvalidWord", 1) != 0);
     endGroup();
@@ -416,6 +420,24 @@ static void buildMain() {
     toggleRow(L"Bật loại trừ ứng dụng", L"Tự động giữ tiếng Anh khi dùng ứng dụng đồ họa (Photoshop, AutoCAD...) hoặc game.", C_BLACKLIST_TOGGLE, prefs::isBlacklistEnabled());
     HWND btnBlacklist = row(L"Danh sách loại trừ", L"Quản lý danh sách các ứng dụng và game tự động chuyển sang tiếng Anh.", L"VikeyButton", C_BLACKLIST_BTN, 130, 26, WS_TABSTOP);
     SetWindowTextW(btnBlacklist, L"Quản lý danh sách…"); setBg(btnBlacklist, GROUP);
+    endGroup();
+    beginGroup(L"Terminal & Lập trình (Chống nuốt chữ)");
+    toggleRow(L"Chống nuốt chữ Terminal", L"Bật cơ chế chống nuốt chữ khi gõ trong VS Code, Cursor, Windows Terminal (Claude Code).", C_TERMDELAY_TOGGLE, prefs::getTerminalDelayEnabled() != 0);
+    HWND delayCombo = row(L"Độ trễ phím Terminal", L"Khoảng nghỉ (ms) giữa lệnh xóa và chèn ký tự để Terminal xử lý kịp thời.", L"COMBOBOX", C_TERMDELAY_MS, 140, 200, CBS_DROPDOWNLIST | WS_TABSTOP);
+    SendMessageW(delayCombo, CB_ADDSTRING, 0, (LPARAM)L"10 ms (Nhanh)");
+    SendMessageW(delayCombo, CB_ADDSTRING, 0, (LPARAM)L"15 ms (Khuyên dùng)");
+    SendMessageW(delayCombo, CB_ADDSTRING, 0, (LPARAM)L"20 ms (Rất ổn định)");
+    SendMessageW(delayCombo, CB_ADDSTRING, 0, (LPARAM)L"25 ms (Chậm)");
+    {
+        int curDelay = prefs::getTerminalDelayMs();
+        int sel = 1;
+        if (curDelay <= 10) sel = 0;
+        else if (curDelay <= 15) sel = 1;
+        else if (curDelay <= 20) sel = 2;
+        else sel = 3;
+        SendMessageW(delayCombo, CB_SETCURSEL, sel, 0);
+    }
+    SetWindowPos(delayCombo, nullptr, W - MARGIN - 16 - 140, _y - ROW + 4, 140, 200, SWP_NOZORDER);
     endGroup();
     beginGroup(nullptr);
     bool emojiOn = prefs::getInt(L"EmojiPicker", 0) != 0;
@@ -452,6 +474,18 @@ static LRESULT CALLBACK mainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case C_SITE: flag(L"SmartSwitchPerSite"); break;
         case C_MARK: if (HIWORD(wp) == CBN_SELCHANGE) { prefs::setInt(L"ModernOrthography", SendMessageW(c, CB_GETCURSEL, 0, 0) == 0 ? 1 : 0); core::reloadSettings(); } break;
         case C_ROTATION: flag(L"RotationalTone"); break;
+        case C_AUTOCAP: prefs::setAutoCapitalize(toggleOn(c)); core::reloadSettings(); break;
+        case C_TERMDELAY_TOGGLE: prefs::setTerminalDelayEnabled(toggleOn(c) ? 1 : 0); core::reloadSettings(); refreshEnabled(); break;
+        case C_TERMDELAY_MS: if (HIWORD(wp) == CBN_SELCHANGE) {
+            int sel = (int)SendMessageW(c, CB_GETCURSEL, 0, 0);
+            int ms = 15;
+            if (sel == 0) ms = 10;
+            else if (sel == 1) ms = 15;
+            else if (sel == 2) ms = 20;
+            else if (sel == 3) ms = 25;
+            prefs::setTerminalDelayMs(ms);
+            core::reloadSettings();
+        } break;
         case C_SPELL: flag(L"Spelling"); break;
         case C_RESTORE: flag(L"RestoreIfInvalidWord"); break;
         case C_MACRO: flag(L"UseMacro"); break;
