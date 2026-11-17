@@ -18,36 +18,60 @@ static Int8 _cacheData = 0; //use cache for faster
 
 void initSmartSwitchKey(const Byte* pData, const int& size) {
     _smartSwitchKeyData.clear();
-    if (pData == NULL) return;
+    _cacheKey.clear();
+    _cacheData = 0;
+    if (pData == NULL || size < 2) return;
     Uint16 count = 0;
     Uint32 cursor = 0;
-    if (size >= 2) {
-        memcpy(&count, pData + cursor, 2);
-        cursor+=2;
-    }
-    Uint8 bundleIdSize;
-    Uint8 value;
+    memcpy(&count, pData + cursor, 2);
+    cursor += 2;
+
+    Uint8 bundleIdSize = 0;
+    Uint8 value = 0;
     for (int i = 0; i < count; i++) {
+        if (cursor + 1 > (Uint32)size) break;
         bundleIdSize = pData[cursor++];
-        string bundleId((char*)pData + cursor, bundleIdSize);
+        if (cursor + bundleIdSize + 1 > (Uint32)size) break;
+        string bundleId((const char*)pData + cursor, bundleIdSize);
         cursor += bundleIdSize;
         value = pData[cursor++];
         _smartSwitchKeyData[bundleId] = value;
     }
 }
 
+void sanitizeSmartSwitchKeyEntries(const std::vector<std::string>& browserExeList) {
+    for (const auto& exe : browserExeList) {
+        _smartSwitchKeyData.erase(exe);
+    }
+    for (auto it = _smartSwitchKeyData.begin(); it != _smartSwitchKeyData.end(); ) {
+        if (it->first.find(' ') != string::npos || it->first.find('\t') != string::npos) {
+            it = _smartSwitchKeyData.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    _cacheKey.clear();
+    _cacheData = 0;
+}
+
 void getSmartSwitchKeySaveData(vector<Byte>& outData) {
     outData.clear();
-    Uint16 count = (Uint16)_smartSwitchKeyData.size();
-    outData.push_back((Byte)count);
-    outData.push_back((Byte)(count>>8));
-    
+    vector<std::pair<string, Int8>> validEntries;
     for (std::map<string, Int8>::iterator it = _smartSwitchKeyData.begin(); it != _smartSwitchKeyData.end(); ++it) {
-        outData.push_back((Byte)it->first.length());
-        for (int j = 0; j < it->first.length(); j++) {
-            outData.push_back(it->first[j]);
+        if (it->first.length() > 0 && it->first.length() <= 255) {
+            validEntries.push_back(*it);
         }
-        outData.push_back(it->second);
+    }
+    Uint16 count = (Uint16)validEntries.size();
+    outData.push_back((Byte)(count & 0xFF));
+    outData.push_back((Byte)((count >> 8) & 0xFF));
+    
+    for (size_t i = 0; i < validEntries.size(); i++) {
+        outData.push_back((Byte)validEntries[i].first.length());
+        for (size_t j = 0; j < validEntries[i].first.length(); j++) {
+            outData.push_back(validEntries[i].first[j]);
+        }
+        outData.push_back(validEntries[i].second);
     }
 }
 

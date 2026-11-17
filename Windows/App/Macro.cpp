@@ -16,6 +16,7 @@ static FILETIME _lastModTime = {0, 0};
 static std::map<std::wstring, std::wstring> _table; // lowercased shortcut -> replacement
 static std::wstring _buffer;
 static bool _bufferCapsLock = false;
+static bool _bufferOverflow = false;
 
 static std::wstring toLowerStr(const std::wstring& s) {
     std::wstring out = s;
@@ -123,24 +124,22 @@ static void createSampleFile(const std::wstring& path) {
 }
 
 void reload() {
-    _table.clear();
     std::wstring path = macroFilePath();
     if (!fileExists(path)) {
         createSampleFile(path);
     }
 
-    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
 
     DWORD size = GetFileSize(h, nullptr);
     if (size == 0) {
         CloseHandle(h);
-        createSampleFile(path);
-        h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) return;
-        size = GetFileSize(h, nullptr);
+        _table.clear();
+        _lastModTime = getFileModTime(path);
+        return;
     }
-    if (size == 0 || size == INVALID_FILE_SIZE) {
+    if (size == INVALID_FILE_SIZE) {
         CloseHandle(h);
         return;
     }
@@ -153,7 +152,7 @@ void reload() {
     }
     CloseHandle(h);
 
-    _lastModTime = getFileModTime(path);
+    FILETIME currentMod = getFileModTime(path);
 
     // Decode file to UTF-16
     std::wstring text;
@@ -180,6 +179,8 @@ void reload() {
             }
         }
     }
+
+    std::map<std::wstring, std::wstring> newTable;
 
     // Parse lines
     size_t start = 0;
@@ -232,8 +233,11 @@ void reload() {
             }
         }
 
-        _table[toLowerStr(shortcut)] = unescaped;
+        newTable[toLowerStr(shortcut)] = unescaped;
     }
+
+    _table = std::move(newTable);
+    _lastModTime = currentMod;
 }
 
 void init() {
@@ -262,18 +266,19 @@ void openMacroFile() {
 void onChar(wchar_t c, bool capsLock) {
     if (!_enabled) return;
     if (c == 0 || c < 32) return;
+    if (_bufferOverflow) return;
     if (_buffer.empty()) {
         _bufferCapsLock = capsLock;
     }
     if (_buffer.size() < 64) {
         _buffer.push_back(c);
     } else {
-        _buffer.clear();
-        _bufferCapsLock = false;
+        _bufferOverflow = true;
     }
 }
 
 void onBackspace() {
+    if (_bufferOverflow) return;
     if (!_buffer.empty()) {
         _buffer.pop_back();
         if (_buffer.empty()) _bufferCapsLock = false;
@@ -283,6 +288,7 @@ void onBackspace() {
 void reset() {
     _buffer.clear();
     _bufferCapsLock = false;
+    _bufferOverflow = false;
 }
 
 bool isDelimiter(WORD vk, unsigned short engineKey, bool shift) {
@@ -340,17 +346,50 @@ static std::wstring applyCasing(const std::wstring& typed, const std::wstring& t
     return templateRepl;
 }
 
-bool match(std::wstring& outReplacement, int& outShortcutLen) {
-    if (!_enabled || _buffer.empty()) return false;
+static std::wstring collapseDoubleKeys(const std::wstring& s) {
+    std::wstring r;
+    r.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (i + 1 < s.size()) {
+            if (s[i] == L'd' && s[i+1] == L'd') { r += L'đ'; i++; continue; }
+            if (s[i] == L'o' && s[i+1] == L'o') { r += L'ô'; i++; continue; }
+            if (s[i] == L'e' && s[i+1] == L'e') { r += L'ê'; i++; continue; }
+            if (s[i] == L'a' && s[i+1] == L'a') { r += L'â'; i++; continue; }
+            if (s[i] == L'u' && s[i+1] == L'w') { r += L'ư'; i++; continue; }
+            if (s[i] == L'o' && s[i+1] == L'w') { r += L'ơ'; i++; continue; }
+            if (s[i] == L'a' && s[i+1] == L'w') { r += L'ă'; i++; continue; }
+        }
+        r += s[i];
+    }
+    return r;
+}
 
-    // Hot-reload check on disk modification
-    FILETIME currentMod = getFileModTime(macroFilePath());
-    if (CompareFileTime(&currentMod, &_lastModTime) != 0) {
-        reload();
+bool match(std::wstring& outReplacement, int& outShortcutLen, bool allowTelexCollapse) {
+    if (!_enabled || _buffer.empty() || _bufferOverflow) return false;
+
+    // Hot-reload check on disk modification (throttled to at most once per second)
+    static ULONGLONG lastCheckTick = 0;
+    ULONGLONG now = GetTickCount64();
+    if (now - lastCheckTick > 1000) {
+        lastCheckTick = now;
+        FILETIME currentMod = getFileModTime(macroFilePath());
+        if (CompareFileTime(&currentMod, &_lastModTime) != 0) {
+            reload();
+        }
     }
 
     std::wstring key = toLowerStr(_buffer);
     auto it = _table.find(key);
+
+    // Match Unicode shortcuts (e.g. "đc") when typed via raw Telex double-keys ("ddc") in VN mode,
+    // without stripping diacritics back to ASCII ("dc") so "đc" never triggers macro "dc".
+    if (it == _table.end() && allowTelexCollapse) {
+        std::wstring collapsed = collapseDoubleKeys(key);
+        if (collapsed != key) {
+            it = _table.find(collapsed);
+        }
+    }
+
     if (it != _table.end()) {
         outShortcutLen = (int)_buffer.size();
         outReplacement = applyCasing(_buffer, it->second, _bufferCapsLock);
@@ -362,6 +401,13 @@ bool match(std::wstring& outReplacement, int& outShortcutLen) {
 
 size_t count() {
     return _table.size();
+}
+
+void setTableForTesting(const std::map<std::wstring, std::wstring>& table) {
+    _table = table;
+    _enabled = true;
+    _lastModTime.dwLowDateTime = 0xFFFFFFFF;
+    _lastModTime.dwHighDateTime = 0xFFFFFFFF;
 }
 
 }} // namespace vikey::macro

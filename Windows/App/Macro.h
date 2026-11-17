@@ -1,7 +1,9 @@
 #pragma once
 #include <windows.h>
 #include <string>
+#include <string>
 #include <vector>
+#include <map>
 
 namespace vikey { namespace macro {
 
@@ -31,10 +33,13 @@ bool isDelimiter(WORD vk, unsigned short engineKey, bool shift);
 
 // Check if current buffer matches any macro shortcut
 // If match, returns true and fills replacement text (with case matched) and shortcut length
-bool match(std::wstring& outReplacement, int& outShortcutLen);
+bool match(std::wstring& outReplacement, int& outShortcutLen, bool allowTelexCollapse = true);
 
 // Number of loaded macros
 size_t count();
+
+// Testing helper to isolate and fixture macro table in RAM
+void setTableForTesting(const std::map<std::wstring, std::wstring>& table);
 
 }} // namespace vikey::macro
 

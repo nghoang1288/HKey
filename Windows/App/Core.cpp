@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
+#include <cwctype>
 #include <mutex>
 #pragma comment(lib, "imm32.lib")
 #pragma comment(lib, "psapi.lib")
@@ -174,7 +175,12 @@ static void TLEndWord(const std::string& reason) {
     }
     _tlWordLen = 0; _tlWordTruncated = false;
 }
-static void TLAppendChar(wchar_t c) { if (_tlWordLen == 0) _tlWordLang = vLanguage; if (_tlWordLen < 64) _tlWord[_tlWordLen++] = c; else _tlWordTruncated = true; }
+static void TLAppendChar(wchar_t c) {
+    if (site::focusedIsPassword()) { _tlWordLen = 0; return; }
+    if (_tlWordLen == 0) _tlWordLang = vLanguage;
+    if (_tlWordLen < 64) _tlWord[_tlWordLen++] = c;
+    else _tlWordTruncated = true;
+}
 static std::string TLKeyName(Uint16 key, bool shift) {
     switch (key) { case KEY_SPACE: return "space"; case KEY_RETURN: case KEY_ENTER: return "enter"; case KEY_TAB: return "tab"; case KEY_ESC: return "esc";
                    case KEY_LEFT: case KEY_RIGHT: case KEY_UP: case KEY_DOWN: return "arrow"; }
@@ -236,15 +242,29 @@ static void saveSmartSwitchKeyData() {
     prefs::setBinary(L"smartSwitchKey", savedSmartSwitchKeyData.data(), (DWORD)savedSmartSwitchKeyData.size());
 }
 static void VKLanguageChanged(bool rememberForContext) {
-    if (rememberForContext && vUseSmartSwitchKey) { setAppInputMethodStatus(SmartSwitchContextKey(), vLanguage); saveSmartSwitchKeyData(); }
+    if (rememberForContext && vUseSmartSwitchKey) {
+        if (!(prefs::getInt(L"SmartSwitchPerSite", 1) && site::isBrowser(_frontApp) && _siteHost.empty())) {
+            setAppInputMethodStatus(SmartSwitchContextKey(), vLanguage);
+            saveSmartSwitchKeyData();
+        }
+    }
     prefs::setInt(L"InputMethod", vLanguage);
     if (_observer) _observer(vLanguage);
 }
 static void ApplySmartSwitch() {
+    if (prefs::getInt(L"SmartSwitchPerSite", 1) && site::isBrowser(_frontApp) && _siteHost.empty()) {
+        return; // Đang chờ UIA lấy host, không fallback về raw browser exe!
+    }
     _languageTemp = getAppInputMethodStatus(SmartSwitchContextKey(), vLanguage);
     if ((_languageTemp & 0x01) != vLanguage) {
-        if (_languageTemp != -1) { vLanguage = _languageTemp & 0x01; VKLanguageChanged(false); TLContext(vLanguage); startNewSession(); }
-        else saveSmartSwitchKeyData();
+        if (_languageTemp != -1) {
+            vLanguage = _languageTemp & 0x01;
+            VKLanguageChanged(false);
+            TLContext(vLanguage);
+            startNewSession();
+        } else {
+            saveSmartSwitchKeyData();
+        }
     }
 }
 void onForegroundChanged() {
@@ -252,6 +272,8 @@ void onForegroundChanged() {
     _siteHost.clear(); macro::reset(); _autoCapHelper.reset();
     ResetEnglishWord(true); _autoFixUndo.active = false;
     TLEndWord("app"); _tlApp = _frontApp;
+    _tlWordLen = 0;
+    site::pollPassword();
 
     if (prefs::isBlacklistEnabled() && prefs::isAppBlacklisted(_frontApp)) {
         if (!_isBlacklistActive) {
@@ -271,10 +293,24 @@ void onForegroundChanged() {
 }
 void onSiteChanged(const std::wstring& host) {
     if (host == _siteHost) return;
-    _siteHost = host; macro::reset(); _autoCapHelper.reset();
-    ResetEnglishWord(true); _autoFixUndo.active = false;
+    TLEndWord("site");
+    _siteHost = host;
+
+    int oldLang = vLanguage;
     if (vUseSmartSwitchKey) ApplySmartSwitch();
-    startNewSession();
+
+    // Chỉ reset session khi ngôn ngữ thực sự thay đổi HOẶC người dùng KHÔNG đang gõ dở từ
+    if (vLanguage != oldLang) {
+        _autoCapHelper.reset();
+        ResetEnglishWord(true);
+        _autoFixUndo.active = false;
+        startNewSession();
+    } else if (vKeyCurrentWordLength() == 0) {
+        _autoCapHelper.reset();
+        ResetEnglishWord(true);
+        _autoFixUndo.active = false;
+        startNewSession();
+    }
 }
 
 // ---- Other input language (Japanese, Chinese...) ------------------------------------------
@@ -365,7 +401,7 @@ static void batchEngineChars() {
 /// Sends the engine's result for the current key: backspaces, then the new characters.
 static void SendEngineOutput() {
     int delay = getEffectiveDelayMs();
-    bool hasBrowserFix = (vFixRecommendBrowser && pData->extCode != 4);
+    bool hasBrowserFix = (vFixRecommendBrowser && pData->extCode != 4 && site::isBrowser(_frontApp));
     if (hasBrowserFix) { wchar_t e = 0x202F; batchText(&e, 1); pData->backspaceCount++; }   // defeats address-bar autocomplete
     int bkCount = (pData->backspaceCount > 0 && pData->backspaceCount < MAX_BUFF) ? pData->backspaceCount : 0;
     if (delay > 0 && bkCount > 0) {
@@ -453,7 +489,7 @@ static bool UndoAutoFixWithBackspace() {
     _autoFixUndo.active = false;
     int removeCount = _autoFixUndo.removeCount;
     int delay = getEffectiveDelayMs();
-    if (vFixRecommendBrowser) { wchar_t e = 0x202F; batchText(&e, 1); removeCount++; }
+    if (vFixRecommendBrowser && site::isBrowser(_frontApp)) { wchar_t e = 0x202F; batchText(&e, 1); removeCount++; }
     if (delay > 0 && removeCount > 0) {
         batchBackspaces(removeCount);
         flushBatch();
@@ -584,7 +620,13 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
         else PostMessageW(vEmojiWindow, WM_APP + 10, k->vkCode, (LPARAM)_flag);
         return 1;
     }
-    if (_keycode == KEY_EMPTY) return CallNextHookEx(_kbHook, nCode, wParam, lParam);   // F-keys, media keys...
+    if (_keycode == KEY_EMPTY) {
+        macro::reset();
+        _autoCapHelper.reset();
+        ResetEnglishWord(true);
+        startNewSession();
+        return CallNextHookEx(_kbHook, nCode, wParam, lParam);   // F-keys, media keys...
+    }
 
     // Blacklisted apps (Game Mode): completely pass through keys without intercepting hotkeys or macros
     if (_isBlacklistActive) {
@@ -611,16 +653,20 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
     } else if (macro::isEnabled() && macro::isDelimiter(k->vkCode, _keycode, (_flag & F_SHIFT) != 0)) {
         std::wstring repl;
         int shortcutLen = 0;
-        if (macro::match(repl, shortcutLen)) {
+        if (macro::match(repl, shortcutLen, vLanguage != 0)) {
             int removeCount = shortcutLen;
+            if (vLanguage != 0 && vKeyCurrentWordLength() > 0) {
+                removeCount = vKeyCurrentWordLength();
+            }
             int delay = getEffectiveDelayMs();
-            if (vFixRecommendBrowser) { wchar_t e = 0x202F; batchText(&e, 1); removeCount++; }
+            if (vFixRecommendBrowser && site::isBrowser(_frontApp)) { wchar_t e = 0x202F; batchText(&e, 1); removeCount++; }
             if (delay > 0 && removeCount > 0) {
                 batchBackspaces(removeCount);
                 flushBatch();
                 Sleep(delay);
-            } else {
+            } else if (removeCount > 0) {
                 batchBackspaces(removeCount);
+                flushBatch();
             }
             batchText(repl.c_str(), (int)repl.size());
 
@@ -677,6 +723,9 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
     if (autoCapThisKey) capsStatus = 1;
     vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, _keycode,
                     capsStatus, OTHER_CONTROL_KEY);
+    if (_keycode == KEY_DELETE && vKeyCurrentWordLength() == 0) {
+        macro::reset();
+    }
     if (pData->code == vDoNothing) {
         if (autoCapThisKey) {
             Uint16 upperChar = keyCodeToCharacter(_keycode | CAPS_MASK);
@@ -694,7 +743,7 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
         bool autoSwitchAtBreak = vAutoSwitchRequest == 0 && !IsLetterKey(_keycode);
         int correctedCount = pData->newCharCount;
         SendEngineOutput();
-        if (vAutoSwitchRequest == 0) ApplyAutoSwitchToEnglish(correctedCount, autoSwitchAtBreak);
+        if (vAutoSwitchByTyping && vAutoSwitchRequest == 0) ApplyAutoSwitchToEnglish(correctedCount, autoSwitchAtBreak);
     }
     return 1;   // consumed
 }
@@ -716,12 +765,19 @@ static VOID CALLBACK foregroundHook(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWOR
 
 bool start() {
     if (_kbHook) return true;
+    site::startBackgroundWorker();
     timeBeginPeriod(1);
     pData = (vKeyHookState*)vKeyInit();
     reloadSettings();
     macro::init();
     std::vector<BYTE> data = prefs::getBinary(L"smartSwitchKey");
     initSmartSwitchKey(data.data(), (int)data.size());
+    static const std::vector<std::string> browserExes = {
+        "chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe",
+        "opera.exe", "opera_gx.exe", "firefox.exe", "chromium.exe", "arc.exe"
+    };
+    sanitizeSmartSwitchKeyEntries(browserExes);
+    saveSmartSwitchKeyData();
     queryFrontMostApp(); _tlApp = _frontApp;
     HINSTANCE inst = GetModuleHandleW(nullptr);
     _kbHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardHook, inst, 0);
@@ -733,6 +789,7 @@ bool start() {
 }
 void stop() {
     flushTypingLog();
+    site::stopBackgroundWorker();
     if (_kbHook) UnhookWindowsHookEx(_kbHook); if (_mouseHook) UnhookWindowsHookEx(_mouseHook); if (_fgHook) UnhookWinEvent(_fgHook); if (_focusHook) UnhookWinEvent(_focusHook);
     _kbHook = nullptr; _mouseHook = nullptr; _fgHook = nullptr;
     timeEndPeriod(1);

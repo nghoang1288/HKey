@@ -1,4 +1,4 @@
-# Build portable HKey.exe using w64devkit GCC/Ninja toolchain
+﻿# Build portable HKey.exe using w64devkit GCC/Ninja toolchain
 param(
     [string]$OutputDir = "$PSScriptRoot/dist/HKey-Portable"
 )
@@ -14,9 +14,17 @@ $buildDir = "$root/Windows/build"
 
 Write-Host "==> Configuring CMake with GCC & Ninja..." -ForegroundColor Cyan
 cmake -S "$root/Windows" -B "$buildDir" -G Ninja -DCMAKE_CXX_COMPILER=g++ -DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "CMake configuration failed with exit code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
 
 Write-Host "==> Building HKey..." -ForegroundColor Cyan
 cmake --build "$buildDir" --target hkey
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Build failed with exit code $LASTEXITCODE"
+    exit $LASTEXITCODE
+}
 
 $exeSource = "$buildDir/App/HKey.exe"
 if (-not (Test-Path $exeSource)) {
@@ -30,6 +38,16 @@ if (-not (Test-Path $OutputDir)) {
 }
 
 Copy-Item $exeSource -Destination "$OutputDir/HKey.exe" -Force
+
+# Sign HKey.exe when local signing helper exists
+if (Test-Path "$PSScriptRoot/sign.ps1") {
+    Write-Host "==> Signing HKey.exe..." -ForegroundColor Cyan
+    try {
+        & "$PSScriptRoot/sign.ps1" -FilePath "$OutputDir/HKey.exe", $exeSource
+    } catch {
+        Write-Warning "Signing failed or skipped: $($_.Exception.Message)"
+    }
+}
 
 # Create or copy default macro.txt
 $macroDest = "$OutputDir/macro.txt"

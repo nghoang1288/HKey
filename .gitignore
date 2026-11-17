@@ -4,6 +4,7 @@
 *.o
 *.a
 *.zip
+*.pfx
 build/
 Windows/build/
 Windows/dist/
@@ -11,3 +12,6 @@ Windows/installer/out/
 Windows/Tests/*.exe
 Windows/Tests/*.out
 Windows/Tests/macro.txt
+Tools/certs/
+Tools/HKeyMacroSync-Final.cmd
+Windows/sign.ps1

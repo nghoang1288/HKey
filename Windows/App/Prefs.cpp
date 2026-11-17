@@ -2,6 +2,7 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <algorithm>
+#include <cwctype>
 #include <sstream>
 
 namespace vikey { namespace prefs {

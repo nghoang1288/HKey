@@ -2,7 +2,7 @@
 #ifdef VIKEY_VERSION
 #define HKEY_VERSION VIKEY_VERSION
 #else
-#define HKEY_VERSION "1.0.25"
+#define HKEY_VERSION "1.0.26"
 #endif
 #endif
 #ifndef HKEY_VERSION_W
@@ -320,7 +320,7 @@ static void destroyChildren(HWND h) { std::vector<HWND> kids; for (HWND c = GetW
 // ---- main window -----------------------------------------------------------------------------
 enum { C_SEG = 200, C_HOTKEY, C_BEEP, C_AUTO, C_PAUSE, C_SMART, C_SITE, C_MARK, C_SPELL, C_RESTORE, C_MACRO, C_MACROFILE, C_LOGIN, C_UPDATE, C_LOGKEYS, C_EMOJI, C_EMOJIKEY,
        C_ROTATION, C_BLACKLIST_TOGGLE, C_BLACKLIST_BTN,
-       C_AUTOCAP, C_TERMDELAY_TOGGLE, C_TERMDELAY_MS,
+       C_AUTOCAP, C_TERMDELAY_TOGGLE, C_TERMDELAY_MS, C_FEEDBACK,
        BL_LIST = 280, BL_ADD_RUNNING, BL_ADD_FILE, BL_REMOVE, BL_RESET, BL_CLOSE,
        L_REFRESH = 300, L_OPEN, L_CLEAR, A_LINK = 400, O_BACK = 500, O_NEXT, O_REC, O_BEEP, O_EMOJI, O_EMOJIKEY, O_EDIT = 520 };
 static void showBlacklistDialog(HWND parent);
@@ -447,8 +447,9 @@ static void buildMain() {
     endGroup();
     beginGroup(nullptr);
     toggleRow(L"Mở HKey khi đăng nhập", L"Tự mở HKey mỗi khi bạn đăng nhập vào Windows.", C_LOGIN, prefs::launchAtLogin());
-    toggleRow(L"Tự động cập nhật", L"Mỗi ngày HKey kiểm tra bản mới trên GitHub, tự tải về và cài khi bạn thoát HKey hoặc tắt máy.", C_UPDATE, prefs::getInt(L"AutoUpdate", 1) != 0);
-    
+    toggleRow(L"Tự động cập nhật", L"Mỗi ngày HKey kiểm tra bản mới trên GitHub, tự tải về và thông báo cập nhật ngay hoặc khi thoát.", C_UPDATE, prefs::getInt(L"AutoUpdate", 1) != 0);
+    HWND btnFeedback = row(L"Góp ý & Báo lỗi", L"Gửi ý kiến đóng góp hoặc báo lỗi từ gõ sai để tác giả hoàn thiện HKey.", L"VikeyButton", C_FEEDBACK, 100, 26, WS_TABSTOP);
+    SetWindowTextW(btnFeedback, L"Góp ý…"); setBg(btnFeedback, GROUP);
     endGroup();
     refreshEnabled();
     RECT wr = {0, 0, W, _y}; AdjustWindowRectEx(&wr, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, 0);
@@ -495,7 +496,7 @@ static LRESULT CALLBACK mainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case C_EMOJI: prefs::setInt(L"EmojiPicker", toggleOn(c)); core::reloadSettings(); emoji::settingsChanged(); afterHotkeyChange(); break;
         case C_LOGIN: prefs::setLaunchAtLogin(toggleOn(c)); setToggle(c, prefs::launchAtLogin()); break;
         case C_UPDATE: prefs::setInt(L"AutoUpdate", toggleOn(c)); break;
-        
+        case C_FEEDBACK: ShellExecuteW(nullptr, L"open", L"https://github.com/nghoang1288/HKey/issues/new", nullptr, nullptr, SW_SHOW); break;
         }
         return 0; }
     case WM_REBUILD: buildMain(); return 0;
@@ -838,7 +839,7 @@ static LRESULT CALLBACK aboutProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             {{L"Phát triển từ ", L"", fSmall, SECONDARY}, {L"Vikey", L"https://github.com/tonyminibot/Vikey", fSmall, ACCENT}, {L" & ", L"", fSmall, SECONDARY}, {L"OpenKey", L"https://github.com/tuyenvm/OpenKey", fSmall, ACCENT}},
             {{L"Mã nguồn mở theo giấy phép GPL-3.0", L"", fSmall, SECONDARY}},
             {},
-            {{L"GitHub", L"https://github.com/nghoang1288/HKey", fSmall, ACCENT}, {L"  ·  ", L"", fSmall, SECONDARY}, {L"Ghi nhận", L"ack:", fSmall, ACCENT}}};
+            {{L"GitHub", L"https://github.com/nghoang1288/HKey", fSmall, ACCENT}, {L"  ·  ", L"", fSmall, SECONDARY}, {L"Góp ý & Báo lỗi", L"https://github.com/nghoang1288/HKey/issues/new", fSmall, ACCENT}, {L"  ·  ", L"", fSmall, SECONDARY}, {L"Ghi nhận", L"ack:", fSmall, ACCENT}}};
         for (auto& l : lines) { if (l.empty()) { y += 8; continue; } y += drawSegs(mem, l, 0, y, rc.right, true, _aboutLinks) + 1; }
         BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY); SelectObject(mem, old); DeleteObject(bmp); DeleteDC(mem);
         EndPaint(h, &ps); return 0; }

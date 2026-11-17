@@ -1,7 +1,7 @@
 ; HKey for Windows installer (Inno Setup 6). Per-user, no admin prompt, so the app can update itself.
-;   iscc /DVersion=1.0.25 /DArch=x64 /DSrc=..\build\App HKey.iss
+;   iscc /DVersion=1.0.26 /DArch=x64 /DSrc=..\build\App HKey.iss
 #ifndef Version
-  #define Version "1.0.25"
+  #define Version "1.0.26"
 #endif
 #ifndef Arch
   #define Arch "x64"
@@ -61,7 +61,6 @@ ExitSetupMessage=HKey chưa được cài đặt xong. Bạn có chắc muốn t
 
 [Files]
 Source: "{#Src}\HKey.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\dist\HKey-Portable\macro.txt"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 
 [Icons]
 Name: "{userprograms}\HKey"; Filename: "{app}\HKey.exe"
@@ -72,3 +71,11 @@ Name: "desktopicon"; Description: "Tạo biểu tượng trên màn hình nền 
 
 [Run]
 Filename: "{app}\HKey.exe"; Description: "Mở HKey"; Flags: nowait postinstall skipifsilent
+; a self-update (HKey runs the installer silently with /RELAUNCH=1) brings the app back
+Filename: "{app}\HKey.exe"; Flags: nowait; Check: ShouldRelaunch
+
+[Code]
+function ShouldRelaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;

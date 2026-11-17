@@ -8,10 +8,13 @@
 3. Metrics: manual switches per 100 words (ideal user) must not get worse.
 """
 import json, os, re, subprocess, sys, unicodedata
+if hasattr(sys.stdout, 'reconfigure'):
+    try: sys.stdout.reconfigure(encoding='utf-8')
+    except Exception: pass
 HERE = os.path.dirname(os.path.abspath(__file__))
 AS = os.path.dirname(HERE)
 GOLD = os.path.join(HERE, 'golden')
-TMP = os.environ.get('TMPDIR', '/tmp')
+TMP = os.environ.get('TMPDIR', os.environ.get('TEMP', '/tmp'))
 SIM = os.path.join(AS, 'sim', 'sim')
 HARNESS = os.path.join(AS, 'test', 'harness')
 update = len(sys.argv) > 1 and sys.argv[1] == 'update'
@@ -20,7 +23,7 @@ failed = False
 
 def units(typos):
     out = os.path.join(TMP, f'golden_chat_{typos}.units')
-    args = ['python3', os.path.join(AS, 'sim', 'prep.py'), os.path.join(AS, 'sim', 'corpus', 'chat_messages.txt')]
+    args = [sys.executable, os.path.join(AS, 'sim', 'prep.py'), os.path.join(AS, 'sim', 'corpus', 'chat_messages.txt')]
     if typos: args += ['--typos', str(typos)]
     with open(out, 'w') as f: subprocess.run(args, stdout=f, check=True)
     return out
@@ -57,7 +60,7 @@ for typos in (0, 0.03):
 
 # 2. Telex lock
 sys.path.insert(0, os.path.join(AS))
-src = open(os.path.join(AS, 'build_dict.py')).read().split('def load')[0]
+src = open(os.path.join(AS, 'build_dict.py'), encoding='utf-8').read().split('def load')[0]
 ns = {'__file__': os.path.join(AS, 'build_dict.py')}; exec(src, ns)
 TONES = {'́': 's', '̀': 'f', '̉': 'r', '̃': 'x', '̣': 'j'}
 def telex_variants(word):
@@ -89,14 +92,14 @@ counts = {}
 for w, c in syl:
     for v in telex_variants(w): counts[v] = max(counts.get(v, 0), c)
 cases = sorted(counts)
-res = subprocess.run([HARNESS, 'lines'], input=''.join(f'1\t{k} \n' for k in cases), capture_output=True, text=True).stdout.rstrip('\n').split('\n')
+res = subprocess.run([HARNESS, 'lines'], input=''.join(f'1\t{k} \n' for k in cases), capture_output=True, text=True, encoding='utf-8').stdout.rstrip('\n').split('\n')
 lines = [f'{k}\t{r}' for k, r in zip(cases, res)]
 compare('telex_vn_mode.tsv', lines, lambda o, n: print(f'  {o.split(chr(9))[0]}: before {o.split(chr(9))[1:]!r} now {n.split(chr(9))[1:]!r}'))
 
 # 3. metrics
 metrics = {}
 for typos in (0, 0.03):
-    out = subprocess.run([SIM, os.path.join(TMP, f'golden_chat_{typos}.units')], capture_output=True, text=True).stdout
+    out = subprocess.run([SIM, os.path.join(TMP, f'golden_chat_{typos}.units')], capture_output=True, text=True, encoding='utf-8').stdout
     m = re.search(r'manual switches (\d+).*wrong words (\d+)', out)
     metrics[f'chat{"_typos" if typos else ""}'] = {'manual': int(m.group(1)), 'wrong': int(m.group(2))}
 mpath = os.path.join(GOLD, 'metrics.json')

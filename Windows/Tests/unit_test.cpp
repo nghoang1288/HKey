@@ -43,9 +43,16 @@ static std::string typeWithRotational(const char* keys, int rotational) {
     return o;
 }
 
-int main() {
+int wmain() {
     printf("=== RUNNING UNIT TESTS ===\n\n");
     int failed = 0;
+
+    // Sandbox backup of registry prefs
+    bool origBlEnabled = vikey::prefs::isBlacklistEnabled();
+    auto origBl = vikey::prefs::getBlacklist();
+    int origTermDelayEnabled = vikey::prefs::getTerminalDelayEnabled();
+    int origTermDelayMs = vikey::prefs::getTerminalDelayMs();
+    int origAutoCap = vikey::prefs::getAutoCapitalize();
 
     // Test 1: Rotational tone enabled
     printf("--- Test 1: Rotational Tone Cycles (vRotationalTone = 1) ---\n");
@@ -312,5 +319,12 @@ int main() {
     } else {
         printf("SOME TESTS FAILED! (%d failures)\n", failed);
     }
+    // Sandbox restore of original registry prefs
+    vikey::prefs::setBlacklistEnabled(origBlEnabled);
+    vikey::prefs::setBlacklist(origBl);
+    vikey::prefs::setTerminalDelayEnabled(origTermDelayEnabled);
+    vikey::prefs::setTerminalDelayMs(origTermDelayMs);
+    vikey::prefs::setAutoCapitalize(origAutoCap);
+
     return failed;
 }

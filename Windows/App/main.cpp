@@ -21,8 +21,9 @@
 static const UINT WM_TRAY = WM_APP + 1;
 static const UINT WM_HKEY_SETLANG = WM_APP + 2;   // tests: wParam = language (0 English, 1 Vietnamese)
 static const UINT WM_HKEY_EMOJI = WM_APP + 5;     // the emoji hotkey, posted from the keyboard hook
+static const UINT WM_HKEY_SITE_CHANGED = WM_APP + 6;
 static const UINT TIMER_FLUSH = 1, TIMER_SITE = 2;
-enum { ID_VIET = 100, ID_ENG, ID_SETTINGS, ID_AUTOSWITCH, ID_MACROTOGGLE, ID_UPDATE, ID_LOGTOGGLE, ID_LOG, ID_ABOUT, ID_QUIT, ID_GUIDE };
+enum { ID_VIET = 100, ID_ENG, ID_SETTINGS, ID_AUTOSWITCH, ID_MACROTOGGLE, ID_UPDATE, ID_LOGTOGGLE, ID_LOG, ID_ABOUT, ID_QUIT, ID_GUIDE, ID_FEEDBACK };
 
 static HWND _hwnd; static NOTIFYICONDATAW _nid = {};
 static HICON _iconV, _iconE;
@@ -81,12 +82,13 @@ static void showMenu() {
     AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Mở HKey…");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_GUIDE, L"Hướng dẫn…");
+    AppendMenuW(m, MF_STRING, ID_FEEDBACK, L"Góp ý & Báo lỗi…");
     AppendMenuW(m, MF_STRING, ID_UPDATE, L"Kiểm tra cập nhật…");
     AppendMenuW(m, MF_STRING, ID_ABOUT, L"Giới thiệu HKey");
     HMENU dbg = CreatePopupMenu();
     AppendMenuW(dbg, MF_STRING | (prefs::getInt(L"TypingLogEnabled", 0) ? MF_CHECKED : 0), ID_LOGTOGGLE, L"Ghi nhật ký gõ");
     AppendMenuW(dbg, MF_STRING | (prefs::getInt(L"TypingLogEnabled", 0) ? 0 : MF_GRAYED), ID_LOG, L"Xem nhật ký gõ…");
-    AppendMenuW(dbg, MF_POPUP, (UINT_PTR)dbg, L"Gỡ lỗi");
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)dbg, L"Gỡ lỗi");
     AppendMenuW(m, MF_STRING, ID_QUIT, L"Thoát HKey");
     POINT pt; GetCursorPos(&pt); SetForegroundWindow(_hwnd);
     TrackPopupMenu(m, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, pt.x, pt.y, 0, _hwnd, nullptr);
@@ -117,6 +119,7 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case ID_AUTOSWITCH: toggle(L"AutoSwitchByTyping", 1); break;
         case ID_MACROTOGGLE: toggle(L"UseMacro", 1); macro::setEnabled(prefs::getInt(L"UseMacro", 1) != 0); break;
         case ID_SETTINGS: ui::showSettings(GetModuleHandleW(nullptr), false); break;
+        case ID_FEEDBACK: ShellExecuteW(nullptr, L"open", L"https://github.com/nghoang1288/HKey/issues/new", nullptr, nullptr, SW_SHOW); break;
         case ID_UPDATE: updater::checkNow(h); break;
         case ID_ABOUT: ui::showAbout(GetModuleHandleW(nullptr)); break;
         case ID_GUIDE: ui::showOnboarding(GetModuleHandleW(nullptr)); break;
@@ -126,9 +129,16 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_APP + 3: ui::showSettings(GetModuleHandleW(nullptr), false); return 0;
-    case updater::WM_UPDATER: updater::onEvent(wp); return 0;
+    case updater::WM_UPDATER: updater::onEvent(wp, lp); return 0;
     case WM_HKEY_SETLANG: core::setLanguageQuiet((int)wp); return 1;
     case WM_HKEY_EMOJI: emoji::toggle(); return 0;
+    case WM_HKEY_SITE_CHANGED:
+        if (hkey::prefs::getInt(L"SmartSwitchPerSite", 1)) {
+            hkey::core::onSiteChanged(hkey::site::currentHost());
+        } else {
+            hkey::core::onSiteChanged(L"");
+        }
+        return 0;
     case WM_TIMER: if (wp == TIMER_FLUSH) core::flushTypingLog(); else if (wp == TIMER_SITE) hkey::site::poll(); return 0;
     case WM_SETTINGCHANGE: { bool dark = darkTaskbar(); DestroyIcon(_iconV); DestroyIcon(_iconE); _iconV = makeIcon(L'V', dark); _iconE = makeIcon(L'E', dark); updateTray(core::language()); return 0; }
     case WM_DESTROY: core::stop(); Shell_NotifyIconW(NIM_DELETE, &_nid); PostQuitMessage(0); return 0;
@@ -136,7 +146,10 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
+    int updateRc = hkey::updater::handleUpdateCommandLine(cmdLine);
+    if (updateRc >= 0) return updateRc;
+
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\HKeyRunning");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND t = FindWindowW(L"HKeyTray", nullptr);
@@ -145,11 +158,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     }
 
     hkey::prefs::migrateFromOpenKey();
-    hkey::updater::installPendingAtLaunch();
+    if (hkey::updater::installPendingAtLaunch()) {
+        CloseHandle(single);
+        return 0;
+    }
 
     WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = inst; wc.lpszClassName = L"HKeyTray"; wc.style = CS_DBLCLKS;
     RegisterClassW(&wc);
     _hwnd = CreateWindowExW(0, L"HKeyTray", L"HKey", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
+    hkey::site::setNotificationWindow(_hwnd, WM_HKEY_SITE_CHANGED);
 
     bool dark = darkTaskbar();
     _iconV = makeIcon(L'V', dark); _iconE = makeIcon(L'E', dark);

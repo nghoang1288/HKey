@@ -35,6 +35,40 @@ inline Uint16 engineKey(DWORD vk) {
         case VK_OEM_PERIOD: return KEY_DOT;
         case VK_OEM_MINUS: return KEY_MINUS;
         case VK_OEM_PLUS: return KEY_EQUALS;
+        // Numpad keys: map numbers/operators when NumLock is ON, navigation/break when OFF
+        case VK_MULTIPLY: return KEY_ESC;
+        case VK_NUMPAD0: case VK_NUMPAD1: case VK_NUMPAD2: case VK_NUMPAD3: case VK_NUMPAD4:
+        case VK_NUMPAD5: case VK_NUMPAD6: case VK_NUMPAD7: case VK_NUMPAD8: case VK_NUMPAD9:
+        case VK_DECIMAL: case VK_ADD: case VK_SUBTRACT: case VK_DIVIDE: {
+            bool numlockOn = (GetKeyState(VK_NUMLOCK) & 1) != 0;
+            if (numlockOn) {
+                switch (vk) {
+                    case VK_NUMPAD0: return KEY_0;
+                    case VK_NUMPAD1: return KEY_1;
+                    case VK_NUMPAD2: return KEY_2;
+                    case VK_NUMPAD3: return KEY_3;
+                    case VK_NUMPAD4: return KEY_4;
+                    case VK_NUMPAD5: return KEY_5;
+                    case VK_NUMPAD6: return KEY_6;
+                    case VK_NUMPAD7: return KEY_7;
+                    case VK_NUMPAD8: return KEY_8;
+                    case VK_NUMPAD9: return KEY_9;
+                    case VK_DECIMAL: return KEY_DOT;
+                    case VK_SUBTRACT: return KEY_MINUS;
+                    case VK_ADD: return KEY_EQUALS;
+                    case VK_DIVIDE: return KEY_SLASH;
+                    default: return KEY_ESC;
+                }
+            } else {
+                switch (vk) {
+                    case VK_NUMPAD4: return KEY_LEFT;
+                    case VK_NUMPAD6: return KEY_RIGHT;
+                    case VK_NUMPAD8: return KEY_UP;
+                    case VK_NUMPAD2: return KEY_DOWN;
+                    default: return KEY_ESC;
+                }
+            }
+        }
         // keys the engine treats as word breaks (it has no code of its own for them): act like Esc
         case VK_INSERT: case VK_HOME: case VK_END: case VK_DELETE: case VK_PRIOR: case VK_NEXT:
         case VK_SNAPSHOT: case VK_PRINT: case VK_SELECT: case VK_HELP: case VK_EXECUTE: case VK_NUMLOCK: case VK_SCROLL:

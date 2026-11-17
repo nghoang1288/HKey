@@ -11,10 +11,12 @@
 
 #include "DataType.h"
 #include <string>
+#include <vector>
 
 using namespace std;
 
 void initSmartSwitchKey(const Byte* pData, const int& size);
+void sanitizeSmartSwitchKeyEntries(const std::vector<std::string>& browserExeList);
 
 /**
  * convert all data to save on disk

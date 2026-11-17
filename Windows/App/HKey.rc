@@ -1,8 +1,18 @@
 #include <windows.h>
 #include "resource.h"
+#include "HKeyVersion.h"
 
 #ifndef HKEY_VERSION_STR
-#define HKEY_VERSION_STR "1.0.25"
+#define HKEY_VERSION_STR "1.0.26"
+#endif
+#ifndef HKEY_VER_MAJOR
+#define HKEY_VER_MAJOR 1
+#endif
+#ifndef HKEY_VER_MINOR
+#define HKEY_VER_MINOR 0
+#endif
+#ifndef HKEY_VER_PATCH
+#define HKEY_VER_PATCH 26
 #endif
 
 IDI_APP ICON "HKey.ico"
@@ -11,8 +21,8 @@ IDR_SOUND_VI RCDATA "Sounds/SwitchToVietnamese.wav"
 IDR_SOUND_EN RCDATA "Sounds/SwitchToEnglish.wav"
 IDR_EMOJI_JSON RCDATA "Emoji.json"
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,25,0
- PRODUCTVERSION 1,0,25,0
+ FILEVERSION HKEY_VER_MAJOR,HKEY_VER_MINOR,HKEY_VER_PATCH,0
+ PRODUCTVERSION HKEY_VER_MAJOR,HKEY_VER_MINOR,HKEY_VER_PATCH,0
  FILEOS 0x40004L
  FILETYPE 0x1L
 BEGIN

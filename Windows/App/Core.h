@@ -2,6 +2,7 @@
 // smart switch per app/website, auto switch by typing, and the typing log.
 #pragma once
 #include <windows.h>
+#include <cwctype>
 #include <string>
 #include <functional>
 

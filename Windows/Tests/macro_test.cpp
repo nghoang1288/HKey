@@ -2,6 +2,7 @@
 #include <cassert>
 #include <iostream>
 #include <string>
+#include <map>
 #include "../App/Macro.h"
 
 // Simple test assertions
@@ -12,11 +13,20 @@
     } \
 } while(0)
 
-int main() {
+int wmain() {
     std::cout << "Testing Vikey Macro subsystem..." << std::endl;
 
     // 1. Initialize
     vikey::macro::init();
+    vikey::macro::setEnabled(true);
+    std::map<std::wstring, std::wstring> fixture = {
+        {L"k", L"không"},
+        {L"dc", L"được"},
+        {L"ng", L"người"},
+        {L"vn", L"Việt Nam"},
+        {L"vk", L"Vikey"}
+    };
+    vikey::macro::setTableForTesting(fixture);
     std::cout << "Loaded " << vikey::macro::count() << " macros." << std::endl;
     TEST_ASSERT(vikey::macro::count() > 0);
 
@@ -88,6 +98,57 @@ int main() {
     vikey::macro::onChar(L'y');
     vikey::macro::onChar(L'z');
     TEST_ASSERT(!vikey::macro::match(repl, len));
+
+    // 10. Test long word buffer overflow (65 chars + 'k' should NOT trigger 'k:không')
+    vikey::macro::reset();
+    for (int i = 0; i < 65; i++) {
+        vikey::macro::onChar(L'x');
+    }
+    vikey::macro::onChar(L'k');
+    TEST_ASSERT(!vikey::macro::match(repl, len));
+
+    // 10b. Test buffer overflow when shortcut is at beginning (e.g. 'k' + 64 'x' chars)
+    vikey::macro::reset();
+    vikey::macro::onChar(L'k');
+    for (int i = 0; i < 64; i++) {
+        vikey::macro::onChar(L'x');
+    }
+    TEST_ASSERT(!vikey::macro::match(repl, len));
+
+    // 11. Test reset clears overflow
+    vikey::macro::reset();
+    vikey::macro::onChar(L'k');
+    TEST_ASSERT(vikey::macro::match(repl, len));
+    TEST_ASSERT(repl == L"không");
+
+    // 12. Typing "đc" (direct or Telex "ddc") must NOT trigger ASCII macro "dc"
+    vikey::macro::reset();
+    vikey::macro::onChar(L'đ');
+    vikey::macro::onChar(L'c');
+    TEST_ASSERT(!vikey::macro::match(repl, len));
+
+    vikey::macro::reset();
+    vikey::macro::onChar(L'd');
+    vikey::macro::onChar(L'd');
+    vikey::macro::onChar(L'c');
+    TEST_ASSERT(!vikey::macro::match(repl, len, true));
+
+    // 13. Explicit Vietnamese shortcut "đc" matches via Telex "ddc" in VN mode only
+    fixture[L"đc"] = L"đồng chí";
+    vikey::macro::setTableForTesting(fixture);
+    vikey::macro::reset();
+    vikey::macro::onChar(L'd');
+    vikey::macro::onChar(L'd');
+    vikey::macro::onChar(L'c');
+    TEST_ASSERT(!vikey::macro::match(repl, len, false));
+    TEST_ASSERT(vikey::macro::match(repl, len, true));
+    TEST_ASSERT(repl == L"đồng chí");
+
+    vikey::macro::reset();
+    vikey::macro::onChar(L'd');
+    vikey::macro::onChar(L'c');
+    TEST_ASSERT(vikey::macro::match(repl, len, true));
+    TEST_ASSERT(repl == L"được");
 
     std::cout << "All Vikey Macro unit tests PASSED successfully!" << std::endl;
     return 0;

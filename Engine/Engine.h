@@ -203,6 +203,7 @@ void vKeyHandleEvent(const vKeyEvent& event,
  * Start a new word
  */
 void startNewSession();
+int vKeyCurrentWordLength();
 
 /**
  * reset spelling value
