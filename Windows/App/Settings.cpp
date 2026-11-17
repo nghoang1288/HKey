@@ -2,7 +2,7 @@
 #ifdef VIKEY_VERSION
 #define HKEY_VERSION VIKEY_VERSION
 #else
-#define HKEY_VERSION "1.0.27"
+#define HKEY_VERSION "1.0.28"
 #endif
 #endif
 #ifndef HKEY_VERSION_W
