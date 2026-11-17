@@ -3,6 +3,12 @@
 # Build:      cmake --build Windows/build
 # The test binaries land where Tools/autoswitch/check.sh and the Python scripts expect them.
 cmake_minimum_required(VERSION 3.21)
+if(POLICY CMP0091)
+  cmake_policy(SET CMP0091 NEW)
+endif()
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 project(Vikey LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
