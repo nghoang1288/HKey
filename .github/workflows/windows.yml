@@ -125,7 +125,7 @@ jobs:
         run: |
           $tag = "${{ steps.rel.outputs.tag }}"
           $ver = "${{ steps.rel.outputs.ver }}"
-          $files = (Get-ChildItem dist -File).FullName
+          [string[]]$files = @(Get-ChildItem dist -File | Select-Object -ExpandProperty FullName)
           $ErrorActionPreference = 'Continue'
           gh release view "$tag" -R "${{ github.repository }}" 2>$null | Out-Null
           $exists = ($LASTEXITCODE -eq 0)

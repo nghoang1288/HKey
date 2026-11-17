@@ -1,5 +1,7 @@
 // Emoji picker: data + search (port of App/Model/EmojiSearch.swift) and the popup (port of App/Views/EmojiPicker.swift).
+#ifndef _HAS_STD_BYTE
 #define _HAS_STD_BYTE 0
+#endif
 // Drawn with Direct2D + DirectWrite because GDI/GDI+ cannot draw colour emoji (Segoe UI Emoji's colour glyphs).
 #include "Emoji.h"
 #include "Core.h"

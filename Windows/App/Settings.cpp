@@ -15,7 +15,9 @@
 // onboarding (OnboardingView.swift minus the Accessibility step), the About panel, the
 // Acknowledgements window and the typing-log window. Drawn with GDI+ so the toggles, segmented
 // control and rounded groups look like the macOS ones; text with emoji through DirectWrite.
+#ifndef _HAS_STD_BYTE
 #define _HAS_STD_BYTE 0
+#endif
 #include "Settings.h"
 #include "Core.h"
 #include "Macro.h"
