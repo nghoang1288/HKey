@@ -79,12 +79,16 @@ jobs:
           $shouldRun = $true
           if ("${{ github.ref }}" -eq "refs/heads/main" -and "${{ inputs.release_tag }}" -eq "") {
             $ErrorActionPreference = 'Continue'
+            $PSNativeCommandUseErrorActionPreference = $false
             gh release view "$tag" -R "${{ github.repository }}" 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { $shouldRun = $false }
             git ls-remote --exit-code --tags origin "refs/tags/$tag" 2>$null | Out-Null
             if ($LASTEXITCODE -eq 0) { $shouldRun = $false }
+            $global:LASTEXITCODE = 0
+            $ErrorActionPreference = 'Stop'
           }
           "publish=$($shouldRun.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          exit 0
         env:
           GH_TOKEN: ${{ github.token }}
       - uses: actions/download-artifact@v4
@@ -127,13 +131,16 @@ jobs:
           $ver = "${{ steps.rel.outputs.ver }}"
           [string[]]$files = @(Get-ChildItem dist -File | Select-Object -ExpandProperty FullName)
           $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
           gh release view "$tag" -R "${{ github.repository }}" 2>$null | Out-Null
           $exists = ($LASTEXITCODE -eq 0)
+          $global:LASTEXITCODE = 0
           $ErrorActionPreference = 'Stop'
           if ($exists) {
             gh release upload "$tag" @files --clobber -R "${{ github.repository }}"
           } else {
             gh release create "$tag" @files --target "${{ github.sha }}" --title "HKey $ver" --generate-notes -R "${{ github.repository }}"
           }
+          if ($LASTEXITCODE -ne 0) { throw "GitHub release failed with exit code $LASTEXITCODE" }
         env:
           GH_TOKEN: ${{ github.token }}
