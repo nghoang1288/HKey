@@ -4,9 +4,12 @@
 #include <windows.h>
 #include "Engine.h"
 #include "Driver.h"
+#include "TouchModel.h"
+#include "Vietnamese.h"
 #include "Prefs.h"
 #include "Core.h"
 #include "AutoCap.h"
+#include "KeyMap.h"
 #include <cstdio>
 #include <cassert>
 #include <string>
@@ -49,12 +52,21 @@ int wmain() {
     printf("=== RUNNING UNIT TESTS ===\n\n");
     int failed = 0;
 
-    // Sandbox backup of registry prefs
-    bool origBlEnabled = vikey::prefs::isBlacklistEnabled();
-    auto origBl = vikey::prefs::getBlacklist();
-    int origTermDelayEnabled = vikey::prefs::getTerminalDelayEnabled();
-    int origTermDelayMs = vikey::prefs::getTerminalDelayMs();
-    int origAutoCap = vikey::prefs::getAutoCapitalize();
+    // Sandbox backup of registry prefs (RAII guarantees restore even on early failure)
+    struct PrefsGuard {
+        bool origBlEnabled = vikey::prefs::isBlacklistEnabled();
+        std::vector<std::wstring> origBl = vikey::prefs::getBlacklist();
+        int origTermDelayEnabled = vikey::prefs::getTerminalDelayEnabled();
+        int origTermDelayMs = vikey::prefs::getTerminalDelayMs();
+        int origAutoCap = vikey::prefs::getAutoCapitalize();
+        ~PrefsGuard() {
+            vikey::prefs::setBlacklistEnabled(origBlEnabled);
+            vikey::prefs::setBlacklist(origBl);
+            vikey::prefs::setTerminalDelayEnabled(origTermDelayEnabled);
+            vikey::prefs::setTerminalDelayMs(origTermDelayMs);
+            vikey::prefs::setAutoCapitalize(origAutoCap);
+        }
+    } prefsGuard;
 
     // Test 1: Rotational tone enabled
     printf("--- Test 1: Rotational Tone Cycles (vRotationalTone = 1) ---\n");
@@ -315,18 +327,165 @@ int wmain() {
     assert(!ac.processKey(KEY_A, false, false, false));
     printf("[PASS] Backspace immediate undo cancels auto-capitalization\n");
 
+    // Sentence 11: Taskbar / tray windows must be ignored for smart switch while File Explorer & browsers are tracked
+    assert(vikey::core::isIgnoredSystemUiWindow(L"Shell_TrayWnd", L"explorer.exe"));
+    assert(vikey::core::isIgnoredSystemUiWindow(L"Shell_SecondaryTrayWnd", L"explorer.exe"));
+    assert(vikey::core::isIgnoredSystemUiWindow(L"NotifyIconOverflowWindow", L"explorer.exe"));
+    assert(vikey::core::isIgnoredSystemUiWindow(L"TopLevelWindowForOverflowXamlIsland", L"ShellHost.exe"));
+    assert(vikey::core::isIgnoredSystemUiWindow(L"Windows.UI.Core.CoreWindow", L"ShellExperienceHost.exe"));
+    assert(!vikey::core::isIgnoredSystemUiWindow(L"CabinetWClass", L"explorer.exe"));
+    assert(!vikey::core::isIgnoredSystemUiWindow(L"Chrome_WidgetWin_1", L"chrome.exe"));
+    printf("[PASS] Taskbar/tray windows ignored for SmartSwitch without blocking File Explorer/Chrome\n");
+
+    // Test 7: Engine Edge Cases & Regression Coverage
+    printf("\n--- Test 7: Engine Edge Cases & Regression Coverage ---\n");
+    {
+        struct { const char* keys; const char* expected; } edgeCases[] = {
+            {"w", "ư"},
+            {"W", "Ư"},
+            {"booso", "bóo"},
+            {"lowsnw", "lónw"},
+            {"Thuow", "Thuơ"},
+            {"thuow", "thuơ"},
+            {"Thuowng", "Thương"},
+            {"thuoww", "thuow"},
+            {"hoaw", "hoă"},
+            {"hoaww", "hoaw"},
+            {"gi ", "gi "},
+            {"gia", "gia"},
+            {"chao <s", "cháo"},
+            {"tooi ", "tôi "},
+        };
+        for (const auto& c : edgeCases) {
+            std::string got = typeWithRotational(c.keys, 1);
+            for (unsigned char ch : got) {
+                if (ch == '\0') {
+                    printf("[FAIL] '%s': NUL byte emitted in output!\n", c.keys);
+                    failed++;
+                }
+            }
+            if (got != c.expected) {
+                printf("[FAIL] '%s': got '%s', want '%s'\n", c.keys, got.c_str(), c.expected);
+                failed++;
+            } else {
+                printf("[PASS] '%s' -> '%s'\n", c.keys, got.c_str());
+            }
+        }
+
+        // Ctrl+Return and Mouse click must NOT trigger restore-if-wrong-spelling or leave dirty state
+        vKeyHookState* hs = (vKeyHookState*)vKeyInit();
+        vSetCheckSpelling();
+        vLanguage = 1;
+        vRestoreIfWrongSpelling = 1;
+        startNewSession();
+        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, KEY_W, 0, false);
+        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, KEY_E, 0, false);
+        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, KEY_B, 0, false);
+        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, KEY_RETURN, 0, true);
+        if (hs->code != vDoNothing) {
+            printf("[FAIL] Ctrl+Return triggered engine action code=%d\n", (int)hs->code);
+            failed++;
+        } else {
+            printf("[PASS] Ctrl+Return passes through without bogus restore\n");
+        }
+        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, KEY_W, 0, false);
+        vKeyHandleEvent(vKeyEvent::Mouse, vKeyEventState::MouseDown, 0, 0, false);
+        if (vKeyCurrentWordLength() != 0 || hs->code != vDoNothing) {
+            printf("[FAIL] MouseDown left stale word length=%d or code=%d\n", vKeyCurrentWordLength(), (int)hs->code);
+            failed++;
+        } else {
+            printf("[PASS] MouseDown cleanly resets session\n");
+        }
+
+        // VikeyDriver Shift+Space / Shift+Tab
+        VikeyDriver drv;
+        vLanguage = 1;
+        drv.resetContext();
+        VKEdit sp = drv.press(KEY_SPACE, false, 1);
+        VKEdit tb = drv.press(KEY_TAB, false, 1);
+        if (sp.text != u" " || tb.text != u"\t") {
+            printf("[FAIL] VikeyDriver Shift+Space / Shift+Tab returned wrong characters\n");
+            failed++;
+        } else {
+            printf("[PASS] VikeyDriver Shift+Space -> ' ' and Shift+Tab -> '\\t'\n");
+        }
+
+        // TouchModel zero-dimension & null/0-max guards
+        TMKey badKeys[2] = {{'a', 0, 0, 0, 10}, {'b', 10, 0, 20, 20}};
+        char picked = TouchModel::pick(15, 5, "", 1, badKeys, 2);
+        if (picked != 'b') {
+            printf("[FAIL] TouchModel::pick failed with zero-width key (got %c)\n", picked);
+            failed++;
+        } else {
+            printf("[PASS] TouchModel::pick safely ignores zero-width keys\n");
+        }
+        TMCandidate tmOut[2];
+        if (TouchModel::candidates("test", nullptr, nullptr, 0, badKeys, 2, tmOut, 0) != 0) {
+            printf("[FAIL] TouchModel::candidates with max=0 returned non-zero\n");
+            failed++;
+        } else {
+            printf("[PASS] TouchModel::candidates max=0 guard OK\n");
+        }
+
+        // vAutoSwitchCompletions maxOut=0 and vAutoSwitchIsVietnameseSpelling long input guard
+        char compOut[1][32];
+        int compScores[1];
+        if (vAutoSwitchCompletions(1, "ch", compOut, compScores, 0) != 0) {
+            printf("[FAIL] vAutoSwitchCompletions(maxOut=0) returned non-zero\n");
+            failed++;
+        }
+        std::string longWord(200, 'a');
+        if (vAutoSwitchIsVietnameseSpelling(longWord.c_str())) {
+            printf("[FAIL] Oversized input accepted as Vietnamese spelling\n");
+            failed++;
+        }
+        printf("[PASS] AutoSwitch boundary guards OK\n");
+    }
+
+    // Test 8: KeyMap & AutoCap Edge Cases
+    printf("\n--- Test 8: KeyMap & AutoCap Edge Cases ---\n");
+    {
+        if (vikey::engineKey(VK_SNAPSHOT) == KEY_ESC ||
+            vikey::engineKey(VK_NUMLOCK) == KEY_ESC ||
+            vikey::engineKey(VK_SCROLL) == KEY_ESC) {
+            printf("[FAIL] System keys (PrintScreen/NumLock/ScrollLock) wrongly mapped to KEY_ESC\n");
+            failed++;
+        } else {
+            printf("[PASS] System keys no longer map to KEY_ESC\n");
+        }
+
+        vikey::AutoCapitalizeHelper ac2;
+        ac2.reset();
+        ac2.processKey(KEY_T, false, false, false);
+        ac2.processKey(KEY_H, false, false, false);
+        ac2.processKey(KEY_S, false, false, false);
+        ac2.processKey(KEY_DOT, false, false, false);
+        ac2.processKey(KEY_SPACE, false, false, false);
+        if (ac2.processKey(KEY_A, false, false, false)) {
+            printf("[FAIL] Abbreviation 'ths. ' wrongly triggered auto-capitalization\n");
+            failed++;
+        } else {
+            printf("[PASS] Abbreviation 'ths. ' skips auto-capitalization\n");
+        }
+
+        ac2.reset();
+        ac2.processKey(KEY_0, false, false, false);
+        ac2.processKey(KEY_DOT, false, false, false);
+        ac2.processKey(KEY_SPACE, false, false, false);
+        if (!ac2.processKey(KEY_A, false, false, false)) {
+            printf("[FAIL] '0. ' failed to trigger auto-capitalization\n");
+            failed++;
+        } else {
+            printf("[PASS] '0. ' triggers auto-capitalization correctly\n");
+        }
+    }
+
     printf("\n===================================\n");
     if (failed == 0) {
         printf("ALL TESTS PASSED SUCCESSFULLY! (0 failures)\n");
     } else {
         printf("SOME TESTS FAILED! (%d failures)\n", failed);
     }
-    // Sandbox restore of original registry prefs
-    vikey::prefs::setBlacklistEnabled(origBlEnabled);
-    vikey::prefs::setBlacklist(origBl);
-    vikey::prefs::setTerminalDelayEnabled(origTermDelayEnabled);
-    vikey::prefs::setTerminalDelayMs(origTermDelayMs);
-    vikey::prefs::setAutoCapitalize(origAutoCap);
 
     return failed;
 }

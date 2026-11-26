@@ -10,12 +10,14 @@
 #include "Engine.h"
 #include <string.h>
 #include <cmath>
-#include <list>
+#include <deque>
 #include "AutoSwitchData.h"
 #include "BigramData.h"
 #include <string>
 #include <unordered_map>
 #include <cstdio>
+
+using namespace std;
 
 static vector<Uint8> _charKeyCode = {
     KEY_BACKQUOTE, KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7, KEY_8, KEY_9, KEY_0, KEY_MINUS, KEY_EQUALS,
@@ -74,8 +76,13 @@ vKeyHookState HookState;
  */
 static Uint32 TypingWord[MAX_BUFF];
 static Byte _index = 0;
+struct TypingStateSnapshot {
+    vector<Uint32> word;
+    vector<Uint32> keys;
+};
+static constexpr size_t MAX_TYPING_HISTORY = 32;
 static vector<Uint32> _longWordHelper; //save the word when _index >= MAX_BUFF
-static list<vector<Uint32>> _typingStates; //Aug 28th, 2019: typing helper, save long state of Typing word, can go back and modify the word
+static deque<TypingStateSnapshot> _typingStates; //Aug 28th, 2019: typing helper, save long state of Typing word, can go back and modify the word
 vector<Uint32> _typingStatesData;
 
 /**
@@ -120,23 +127,57 @@ void findAndCalculateVowel(const bool& forGrammar=false);
 void insertMark(const Uint32& markMask, const bool& canModifyFlag=true);
 
 #define AS_MISSING -1000
-#define AS_KEY_LEN 32
+#define AS_KEY_LEN 40
 static void asInitLetters();
 static bool asRawWord(const Uint32* keys, const int& count, char* out);
 static inline int asEnglishScore(const char* word);
 
-static std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
 wstring utf8ToWideString(const string& str) {
-    return converter.from_bytes(str.c_str());
+    wstring out;
+    size_t idx = 0;
+    while (idx < str.size()) {
+        Uint32 cp = 0;
+        unsigned char c = (unsigned char)str[idx];
+        if (c < 0x80) { cp = c; idx += 1; }
+        else if ((c & 0xE0) == 0xC0 && idx + 1 < str.size()) {
+            cp = ((c & 0x1F) << 6) | ((unsigned char)str[idx + 1] & 0x3F); idx += 2;
+        } else if ((c & 0xF0) == 0xE0 && idx + 2 < str.size()) {
+            cp = ((c & 0x0F) << 12) | (((unsigned char)str[idx + 1] & 0x3F) << 6) | ((unsigned char)str[idx + 2] & 0x3F); idx += 3;
+        } else if ((c & 0xF8) == 0xF0 && idx + 3 < str.size()) {
+            cp = ((c & 0x07) << 18) | (((unsigned char)str[idx + 1] & 0x3F) << 12) | (((unsigned char)str[idx + 2] & 0x3F) << 6) | ((unsigned char)str[idx + 3] & 0x3F); idx += 4;
+        } else { cp = 0xFFFD; idx += 1; }
+        if (sizeof(wchar_t) == 2 && cp >= 0x10000) {
+            cp -= 0x10000;
+            out.push_back((wchar_t)(0xD800 + (cp >> 10)));
+            out.push_back((wchar_t)(0xDC00 + (cp & 0x3FF)));
+        } else {
+            out.push_back((wchar_t)cp);
+        }
+    }
+    return out;
 }
 
 string wideStringToUtf8(const wstring& str) {
-    return converter.to_bytes(str.c_str());
+    string out;
+    for (size_t idx = 0; idx < str.size(); idx++) {
+        Uint32 cp = (Uint32)str[idx];
+        if (sizeof(wchar_t) == 2 && cp >= 0xD800 && cp <= 0xDBFF && idx + 1 < str.size()) {
+            Uint32 lo = (Uint32)str[idx + 1];
+            if (lo >= 0xDC00 && lo <= 0xDFFF) { cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); idx++; }
+        }
+        if (cp < 0x80) out.push_back((char)cp);
+        else if (cp < 0x800) { out.push_back((char)(0xC0 | (cp >> 6))); out.push_back((char)(0x80 | (cp & 0x3F))); }
+        else if (cp < 0x10000) { out.push_back((char)(0xE0 | (cp >> 12))); out.push_back((char)(0x80 | ((cp >> 6) & 0x3F))); out.push_back((char)(0x80 | (cp & 0x3F))); }
+        else { out.push_back((char)(0xF0 | (cp >> 18))); out.push_back((char)(0x80 | ((cp >> 12) & 0x3F))); out.push_back((char)(0x80 | ((cp >> 6) & 0x3F))); out.push_back((char)(0x80 | (cp & 0x3F))); }
+    }
+    return out;
 }
 
 void* vKeyInit() {
     _index = 0;
     _stateIndex = 0;
+    memset(TypingWord, 0, sizeof(TypingWord));
+    memset(KeyStates, 0, sizeof(KeyStates));
     _useSpellCheckingBefore = vCheckSpelling;
     _typingStatesData.clear();
     _typingStates.clear();
@@ -210,7 +251,7 @@ void checkSpelling(const bool& forceCheckVowel=false) {
             k = k + 1;
             j = k;
             VSI = k;
-        } else if (_index >= 2 && CHR(0) == KEY_G && CHR(1) == KEY_I && IS_CONSONANT(CHR(2))) {
+        } else if (_spellingEndIndex >= 3 && CHR(0) == KEY_G && CHR(1) == KEY_I && IS_CONSONANT(CHR(2))) {
             VSI = k = j = 1; //Sep 28th: fix gìn
         }
         for (l = 0; l < 3; l++) {
@@ -377,16 +418,34 @@ void checkGrammar(const int& deltaBackSpace) {
             bool isC  = (_index == 4 && CHR(0) == KEY_C);
             bool isD  = (_index == 4 && CHR(0) == KEY_D);
             if (isNh || isC || isD) {
-                bool isDdung = (isD && (TypingWord[0] & TONE_MASK)); // 'đ'
-                bool useHorn = (isNh || isDdung);
-                TypingWord[_index - 3] = KEY_U | (useHorn ? TONEW_MASK : 0) | iMark;
-                if (_stateIndex >= 3) {
-                    KeyStates[_stateIndex - 3] = KEY_U;
+                bool hasOtherVnMark = false;
+                for (int x = 0; x < _index; x++) {
+                    if (x != _index - 3 && (TypingWord[x] & (MARK_MASK | TONE_MASK | TONEW_MASK))) { hasOtherVnMark = true; break; }
                 }
-                isCheckedGrammar = true;
-                tempDisableKey = false;
-                handledAdj = true;
-                if (vCheckSpelling) checkSpelling();
+                bool isEnglishWord = false;
+                if (!hasOtherVnMark) {
+                    asInitLetters();
+                    char raw[AS_KEY_LEN];
+                    if (asRawWord(KeyStates, _stateIndex, raw) && asEnglishScore(raw) != AS_MISSING) {
+                        isEnglishWord = true;
+                    }
+                }
+                if (!isEnglishWord) {
+                    bool isDdung = (isD && (TypingWord[0] & TONE_MASK)); // 'đ'
+                    bool useHorn = (isNh || isDdung);
+                    Uint32 capsMask = TypingWord[_index - 3] & CAPS_MASK;
+                    TypingWord[_index - 3] = KEY_U | capsMask | (useHorn ? TONEW_MASK : 0) | iMark;
+                    for (int x = _stateIndex - 1; x >= 0; x--) {
+                        if ((KeyStates[x] & CHAR_MASK) == KEY_I) {
+                            KeyStates[x] = KEY_U | (KeyStates[x] & CAPS_MASK);
+                            break;
+                        }
+                    }
+                    isCheckedGrammar = true;
+                    tempDisableKey = false;
+                    handledAdj = true;
+                    if (vCheckSpelling) checkSpelling();
+                }
             }
         }
     }
@@ -454,71 +513,79 @@ void insertState(const Uint16& keyCode, const bool& isCaps) {
     }
 }
 
+static void pushTypingHistory(const TypingStateSnapshot& snap) {
+    if (_typingStates.size() >= MAX_TYPING_HISTORY) {
+        _typingStates.pop_front();
+    }
+    _typingStates.push_back(snap);
+}
+
 void saveWord() {
-    //save word history
-    {
-        if (_index > 0) {
-            if (_longWordHelper.size() > 0) { //save long word first
-                _typingStatesData.clear();
-                for (i = 0; i < _longWordHelper.size(); i++) {
-                    if (i != 0 && i % MAX_BUFF == 0) { //save if overflow
-                        _typingStates.push_back(_typingStatesData);
-                        _typingStatesData.clear();
-                    }
-                    _typingStatesData.push_back(_longWordHelper[i]);
+    if (_index > 0) {
+        if (_longWordHelper.size() > 0) { //save long word first
+            TypingStateSnapshot snap;
+            for (size_t idx = 0; idx < _longWordHelper.size(); idx++) {
+                if (idx != 0 && idx % MAX_BUFF == 0) {
+                    pushTypingHistory(snap);
+                    snap.word.clear();
                 }
-                _typingStates.push_back(_typingStatesData);
-                _longWordHelper.clear();
+                snap.word.push_back(_longWordHelper[idx]);
             }
-            
-            //save current word
-            _typingStatesData.clear();
-            for (i = 0; i < _index; i++) {
-                _typingStatesData.push_back(TypingWord[i]);
-            }
-            _typingStates.push_back(_typingStatesData);
+            pushTypingHistory(snap);
+            _longWordHelper.clear();
         }
+        TypingStateSnapshot snap;
+        snap.word.assign(TypingWord, TypingWord + _index);
+        snap.keys.assign(KeyStates, KeyStates + _stateIndex);
+        pushTypingHistory(snap);
     }
 }
 
 void saveWord(const Uint32& keyCode, const int& count) {
-    _typingStatesData.clear();
-    for (i = 0; i < count; i++) {
-        _typingStatesData.push_back(keyCode);
-    }
-    _typingStates.push_back(_typingStatesData);
+    TypingStateSnapshot snap;
+    snap.word.assign(count > 0 ? count : 0, keyCode);
+    pushTypingHistory(snap);
 }
 
 void saveSpecialChar() {
-    _typingStatesData.clear();
-    for (i = 0; i < _specialChar.size(); i++) {
-        _typingStatesData.push_back(_specialChar[i]);
-    }
-    _typingStates.push_back(_typingStatesData);
+    TypingStateSnapshot snap;
+    snap.word = _specialChar;
+    pushTypingHistory(snap);
     _specialChar.clear();
 }
 
 void restoreLastTypingState() {
-    if (_typingStates.size() > 0) {
-        _typingStatesData = _typingStates.back();
+    if (!_typingStates.empty()) {
+        TypingStateSnapshot snap = std::move(_typingStates.back());
         _typingStates.pop_back();
-        if (_typingStatesData.size() > 0){
-            if (_typingStatesData[0] == KEY_SPACE) {
-                _spaceCount = (int)_typingStatesData.size();
+        if (!snap.word.empty()) {
+            if (snap.word[0] == KEY_SPACE) {
+                _spaceCount = (int)snap.word.size();
                 _index = 0;
-            } else if (std::find(_charKeyCode.begin(), _charKeyCode.end(), (Uint16)_typingStatesData[0]) != _charKeyCode.end()) {
+                _stateIndex = 0;
+            } else if (std::find(_charKeyCode.begin(), _charKeyCode.end(), (Uint16)snap.word[0]) != _charKeyCode.end()) {
                 _index = 0;
-                _specialChar = _typingStatesData;
+                _stateIndex = 0;
+                _specialChar = std::move(snap.word);
                 checkSpelling();
             } else {
-                for (i = 0; i < _typingStatesData.size(); i++) {
-                    TypingWord[i] = _typingStatesData[i];
+                size_t wn = snap.word.size() > MAX_BUFF ? MAX_BUFF : snap.word.size();
+                for (size_t idx = 0; idx < wn; idx++) {
+                    TypingWord[idx] = snap.word[idx];
                 }
-                _index = (Byte)_typingStatesData.size();
+                _index = (Byte)wn;
+                size_t kn = snap.keys.size() > MAX_BUFF ? MAX_BUFF : snap.keys.size();
+                for (size_t idx = 0; idx < kn; idx++) {
+                    KeyStates[idx] = snap.keys[idx];
+                }
+                _stateIndex = (Byte)kn;
+                if (vCheckSpelling) checkSpelling();
             }
         }
     }
 }
+
+static bool _afterDigit = false;   //the word started right after a digit: a lone w is a unit (100W), not ư (D33)
 
 void startNewSession() {
     _asDropN = 0;
@@ -527,6 +594,9 @@ void startNewSession() {
     hNCC = 0;
     tempDisableKey = false;
     _stateIndex = 0;
+    _afterDigit = false;
+    memset(TypingWord, 0, sizeof(TypingWord));
+    memset(KeyStates, 0, sizeof(KeyStates));
     _longWordHelper.clear();
 }
 
@@ -568,62 +638,90 @@ void checkCorrectVowel(vector<vector<Uint16>>& charset, int& i, int& k, const Ui
 }
 
 Uint32 getCharacterCode(const Uint32& data) {
-    capsElem = (data & CAPS_MASK) ? 0 : 1;
-    key = data & CHAR_MASK;
-    if (data & MARK_MASK) { //has mark
-        markElem = -2;
+    // Flat O(1) lookup table matching _unicodeTable[baseKey][toneSlot][elem]
+    // toneSlot: 0 = base, 1 = TONE_MASK (^), 2 = TONEW_MASK (horn/breve)
+    static const Uint16 kUnicodeLut[36][3][14] = {
+        /* 0: KEY_A */ {
+            {0x00C2, 0x00E2, 0x0102, 0x0103, 0x00C1, 0x00E1, 0x00C0, 0x00E0, 0x1EA2, 0x1EA3, 0x00C3, 0x00E3, 0x1EA0, 0x1EA1},
+            {0x1EA4, 0x1EA5, 0x1EA6, 0x1EA7, 0x1EA8, 0x1EA9, 0x1EAA, 0x1EAB, 0x1EAC, 0x1EAD, 0, 0, 0, 0},
+            {0x1EAE, 0x1EAF, 0x1EB0, 0x1EB1, 0x1EB2, 0x1EB3, 0x1EB4, 0x1EB5, 0x1EB6, 0x1EB7, 0, 0, 0, 0},
+        },
+        /* 1 */ {},
+        /* 2: KEY_D */ {
+            {0x0110, 0x0111, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+            {}, {},
+        },
+        /* 3..13 */ {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+        /* 14: KEY_E */ {
+            {0x00CA, 0x00EA, 0x0000, 0x0000, 0x00C9, 0x00E9, 0x00C8, 0x00E8, 0x1EBA, 0x1EBB, 0x1EBC, 0x1EBD, 0x1EB8, 0x1EB9},
+            {0x1EBE, 0x1EBF, 0x1EC0, 0x1EC1, 0x1EC2, 0x1EC3, 0x1EC4, 0x1EC5, 0x1EC6, 0x1EC7, 0, 0, 0, 0},
+            {},
+        },
+        /* 15 */ {},
+        /* 16: KEY_Y */ {
+            {0x00DD, 0x00FD, 0x1EF2, 0x1EF3, 0x1EF6, 0x1EF7, 0x1EF8, 0x1EF9, 0x1EF4, 0x1EF5, 0, 0, 0, 0},
+            {}, {},
+        },
+        /* 17..30 */ {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {},
+        /* 31: KEY_O */ {
+            {0x00D4, 0x00F4, 0x01A0, 0x01A1, 0x00D3, 0x00F3, 0x00D2, 0x00F2, 0x1ECE, 0x1ECF, 0x00D5, 0x00F5, 0x1ECC, 0x1ECD},
+            {0x1ED0, 0x1ED1, 0x1ED2, 0x1ED3, 0x1ED4, 0x1ED5, 0x1ED6, 0x1ED7, 0x1ED8, 0x1ED9, 0, 0, 0, 0},
+            {0x1EDA, 0x1EDB, 0x1EDC, 0x1EDD, 0x1EDE, 0x1EDF, 0x1EE0, 0x1EE1, 0x1EE2, 0x1EE3, 0, 0, 0, 0},
+        },
+        /* 32: KEY_U */ {
+            {0x0000, 0x0000, 0x01AF, 0x01B0, 0x00DA, 0x00FA, 0x00D9, 0x00F9, 0x1EE6, 0x1EE7, 0x0168, 0x0169, 0x1EE4, 0x1EE5},
+            {},
+            {0x1EE8, 0x1EE9, 0x1EEA, 0x1EEB, 0x1EEC, 0x1EED, 0x1EEE, 0x1EEF, 0x1EF0, 0x1EF1, 0, 0, 0, 0},
+        },
+        /* 33 */ {},
+        /* 34: KEY_I */ {
+            {0x00CD, 0x00ED, 0x00CC, 0x00EC, 0x1EC8, 0x1EC9, 0x0128, 0x0129, 0x1ECA, 0x1ECB, 0, 0, 0, 0},
+            {}, {},
+        },
+        /* 35 */ {},
+    };
+    int cElem = (data & CAPS_MASK) ? 0 : 1;
+    Uint32 baseKey = data & CHAR_MASK;
+    if (baseKey >= 36) return data & ~STANDALONE_MASK;
+    if (data & MARK_MASK) {
+        int mElem = -2;
         switch (data & MARK_MASK) {
-            case MARK1_MASK:
-                markElem = 0;
-                break;
-            case MARK2_MASK:
-                markElem = 2;
-                break;
-            case MARK3_MASK:
-                markElem = 4;
-                break;
-            case MARK4_MASK:
-                markElem = 6;
-                break;
-            case MARK5_MASK:
-                markElem = 8;
-                break;
+            case MARK1_MASK: mElem = 0; break;
+            case MARK2_MASK: mElem = 2; break;
+            case MARK3_MASK: mElem = 4; break;
+            case MARK4_MASK: mElem = 6; break;
+            case MARK5_MASK: mElem = 8; break;
         }
-        markElem += capsElem;
-        
-        switch (key) {
-            case KEY_A:
-            case KEY_O:
-            case KEY_U:
-            case KEY_E:
-                if ((data & TONE_MASK) == 0 && (data & TONEW_MASK) == 0)
-                    markElem += 4;
-                break;
+        mElem += cElem;
+        if ((baseKey == KEY_A || baseKey == KEY_O || baseKey == KEY_U || baseKey == KEY_E) &&
+            (data & (TONE_MASK | TONEW_MASK)) == 0) {
+            mElem += 4;
         }
-        
-        if (data & TONE_MASK) {
-            key |= TONE_MASK;
-        } else if (data & TONEW_MASK) {
-            key |= TONEW_MASK;
+        int toneSlot = (data & TONE_MASK) ? 1 : ((data & TONEW_MASK) ? 2 : 0);
+        if (baseKey == KEY_D || (baseKey == KEY_U && toneSlot == 1) || (baseKey == KEY_E && toneSlot == 2) ||
+            ((baseKey == KEY_I || baseKey == KEY_Y) && toneSlot != 0) || mElem < 0 || mElem >= 14) {
+            return data & ~STANDALONE_MASK;
         }
-        if (_unicodeTable.find(key) == _unicodeTable.end())
-            return data & ~STANDALONE_MASK; //not found (a standalone w that lost its ư is just u, never a raw flagged code)
-        
-        return _unicodeTable[key][markElem] | CHAR_CODE_MASK;
-    } else { //doesn't has mark
-        if (_unicodeTable.find(key) == _unicodeTable.end())
-            return data & ~STANDALONE_MASK; //not found (a standalone w that lost its ư is just u, never a raw flagged code)
-        
-        if (data & TONE_MASK) {
-            return _unicodeTable[key][capsElem] | CHAR_CODE_MASK;
-        } else if (data & TONEW_MASK) {
-            return _unicodeTable[key][capsElem + 2] | CHAR_CODE_MASK;
-        } else {
-            return data & ~STANDALONE_MASK; //not found (a standalone w that lost its ư is just u, never a raw flagged code)
-        }
+        Uint16 ch = kUnicodeLut[baseKey][toneSlot][mElem];
+        return ch ? (ch | CHAR_CODE_MASK) : (data & ~STANDALONE_MASK);
     }
-    
-    return 0;
+    if (data & TONE_MASK) {
+        if (baseKey != KEY_A && baseKey != KEY_O && baseKey != KEY_U && baseKey != KEY_E && baseKey != KEY_D &&
+            baseKey != KEY_I && baseKey != KEY_Y) {
+            return data & ~STANDALONE_MASK;
+        }
+        Uint16 ch = kUnicodeLut[baseKey][0][cElem];
+        return (ch | CHAR_CODE_MASK);
+    }
+    if (data & TONEW_MASK) {
+        if (baseKey != KEY_A && baseKey != KEY_O && baseKey != KEY_U && baseKey != KEY_E && baseKey != KEY_D &&
+            baseKey != KEY_I && baseKey != KEY_Y) {
+            return data & ~STANDALONE_MASK;
+        }
+        Uint16 ch = kUnicodeLut[baseKey][0][cElem + 2];
+        return (ch | CHAR_CODE_MASK);
+    }
+    return data & ~STANDALONE_MASK;
 }
 
 void findAndCalculateVowel(const bool& forGrammar) {
@@ -679,17 +777,20 @@ void removeMark() {
 }
 
 bool canHasEndConsonant() {
-    vector<vector<Uint32>>& vo = _vowelCombine[CHR(VSI)];
-    for (ii = 0; ii < vo.size(); ii++) {
-        kk = VSI;
-        for (iii = 1; iii < vo[ii].size(); iii++) {
-            if (kk > VEI || ((CHR(kk) | (TypingWord[kk] & TONE_MASK) | (TypingWord[kk] & TONEW_MASK)) != vo[ii][iii])) {
+    auto it = _vowelCombine.find(CHR(VSI));
+    if (it == _vowelCombine.end()) return false;
+    const vector<vector<Uint32>>& vo = it->second;
+    for (size_t vIdx = 0; vIdx < vo.size(); vIdx++) {
+        int pos = VSI;
+        size_t eIdx = 1;
+        for (; eIdx < vo[vIdx].size(); eIdx++) {
+            if (pos > VEI || ((CHR(pos) | (TypingWord[pos] & (TONE_MASK | TONEW_MASK))) != vo[vIdx][eIdx])) {
                 break;
             }
-            kk++;
+            pos++;
         }
-        if (iii >= vo[ii].size()) {
-            return vo[ii][0] == 1;
+        if (eIdx >= vo[vIdx].size()) {
+            return vo[vIdx][0] == 1;
         }
     }
     return false;
@@ -713,7 +814,7 @@ void handleModernMark() {
         
         VWSM = VSI;
         hBPC = _index - VWSM;
-    } else if (CHR(VEI-1) == KEY_A && CHR(VEI) == KEY_Y) {
+    } else if (VEI > 0 && CHR(VEI-1) == KEY_A && CHR(VEI) == KEY_Y) {
         VWSM = VEI - 1;
         hBPC = (_index - VEI) + 1;
     } else if (CHR(VSI) == KEY_U && CHR(VSI+1) == KEY_O) {
@@ -728,19 +829,21 @@ void handleModernMark() {
     }
     
     //rule 3.1
-    if ((CHR(VSI) == KEY_I && (TypingWord[VSI+1] & (KEY_E | TONE_MASK))) ||
-        (CHR(VSI) == KEY_Y && (TypingWord[VSI+1] & (KEY_E | TONE_MASK))) ||
-        (CHR(VSI) == KEY_U && (TypingWord[VSI+1] == (KEY_O | TONE_MASK))) ||
-        ((TypingWord[VSI] == (KEY_U | TONEW_MASK)) && (TypingWord[VSI+1] == (KEY_O | TONEW_MASK)))){
+    Uint32 v1Masked = TypingWord[VSI+1] & (CHAR_MASK | TONE_MASK | TONEW_MASK);
+    Uint32 v0Masked = TypingWord[VSI] & (CHAR_MASK | TONE_MASK | TONEW_MASK);
+    if ((CHR(VSI) == KEY_I && v1Masked == (KEY_E | TONE_MASK)) ||
+        (CHR(VSI) == KEY_Y && v1Masked == (KEY_E | TONE_MASK)) ||
+        (CHR(VSI) == KEY_U && v1Masked == (KEY_O | TONE_MASK)) ||
+        (v0Masked == (KEY_U | TONEW_MASK) && v1Masked == (KEY_O | TONEW_MASK))) {
         
         if (VSI+2 < _index) {
             if (CHR(VSI+2) == KEY_P || CHR(VSI+2) == KEY_T ||
                 CHR(VSI+2) == KEY_M || CHR(VSI+2) == KEY_N ||
                 CHR(VSI+2) == KEY_O || CHR(VSI+2) == KEY_U ||
                 CHR(VSI+2) == KEY_I || CHR(VSI+2) == KEY_C ||
-                (VSI+3 < _index && CHR(VSI+2) == KEY_C && CHR(VSI+2) == KEY_H) ||
-                (VSI+3 < _index && CHR(VSI+2) == KEY_N && CHR(VSI+2) == KEY_H) ||
-                (VSI+3 < _index && CHR(VSI+2) == KEY_N && CHR(VSI+2) == KEY_G)) {
+                (VSI+3 < _index && CHR(VSI+2) == KEY_C && CHR(VSI+3) == KEY_H) ||
+                (VSI+3 < _index && CHR(VSI+2) == KEY_N && CHR(VSI+3) == KEY_H) ||
+                (VSI+3 < _index && CHR(VSI+2) == KEY_N && CHR(VSI+3) == KEY_G)) {
                 
                 VWSM = VSI + 1;
                 hBPC = _index - VWSM;
@@ -753,11 +856,8 @@ void handleModernMark() {
             hBPC = _index - VWSM;
         }
     }
-    //rule 3.2
-    else if ((CHR(VSI) == KEY_I && (CHR(VSI) == KEY_A)) ||
-             (CHR(VSI) == KEY_Y && (CHR(VSI) == KEY_A)) ||
-             (CHR(VSI) == KEY_U && (CHR(VSI) == KEY_A)) ||
-             (CHR(VSI) == KEY_U && (TypingWord[VSI+1] == (KEY_U | TONEW_MASK)))){
+    //rule 3.2: ưu (cứu, lựu) puts the mark on ư; ia/ya/ua are handled by rule 4 below
+    else if (v0Masked == (KEY_U | TONEW_MASK) && CHR(VSI+1) == KEY_U) {
         
         VWSM = VSI;
         hBPC = _index - VWSM;
@@ -830,8 +930,9 @@ void insertMark(const Uint32& markMask, const bool& canModifyFlag) {
     VWSM = 0;
     
     //detect mark position
-    if (vowelCount == 1) {
+    if (vowelCount <= 1) {
         VWSM = VEI;
+        if (VSI < VEI && vowelCount == 0) VSI = VEI;
         hBPC = (_index - VEI);
     } else { //vowel = 2 or 3
         if (vUseModernOrthography == 0)
@@ -888,7 +989,7 @@ void insertD(const Uint16& data, const bool& isCaps) {
                 //restore and disable temporary
                 hCode = vRestore;
                 TypingWord[ii] &= ~TONE_MASK;
-                hData[_index - 1 - ii] = TypingWord[ii];
+                hData[_index - 1 - ii] = GET(TypingWord[ii]) & ~STANDALONE_MASK;
                 tempDisableKey = true;
                 break;
             } else {
@@ -907,8 +1008,12 @@ void insertAOE(const Uint16& data, const bool& isCaps) {
     findAndCalculateVowel();
     
     //remove W tone
+    int minChanged = _index;
     for (ii = VSI; ii <= VEI; ii++) {
-        TypingWord[ii] &= ~TONEW_MASK;
+        if (TypingWord[ii] & TONEW_MASK) {
+            TypingWord[ii] &= ~TONEW_MASK;
+            if (ii < minChanged) minChanged = ii;
+        }
     }
     
     hCode = vWillProcess;
@@ -921,17 +1026,18 @@ void insertAOE(const Uint16& data, const bool& isCaps) {
                 //restore and disable temporary
                 hCode = vRestore;
                 TypingWord[ii] &= ~TONE_MASK;
-                hData[_index - 1 - ii] = TypingWord[ii];
-                //_index = 0;
+                hData[_index - 1 - ii] = GET(TypingWord[ii]) & ~STANDALONE_MASK;
                 if (data != KEY_O) //case thoòng
                     tempDisableKey = true;
-                break;
             } else {
                 TypingWord[ii] |= TONE_MASK;
                 if (!IS_KEY_D(data))
                     TypingWord[ii] &= ~TONEW_MASK;
                 hData[_index - 1 - ii] = GET(TypingWord[ii]);
-                
+            }
+            for (int m = ii - 1; m >= minChanged; m--) {
+                hBPC++;
+                hData[_index - 1 - m] = GET(TypingWord[m]);
             }
             break;
         } else { //preresent old char
@@ -946,18 +1052,19 @@ void insertW(const Uint16& data, const bool& isCaps) {
     
     findAndCalculateVowel();
     
-    //remove ^ tone
-    for (ii = VSI; ii <= VEI; ii++) {
-        TypingWord[ii] &= ~TONE_MASK;
-    }
-    
     if (vowelCount > 1) {
+        Uint32 savedTones[MAX_BUFF];
+        for (ii = VSI; ii <= VEI; ii++) {
+            savedTones[ii] = TypingWord[ii] & TONE_MASK;
+            TypingWord[ii] &= ~TONE_MASK;
+        }
         hBPC = _index - VSI;
         hNCC = hBPC;
         
         if (((TypingWord[VSI] & TONEW_MASK) && (TypingWord[VSI+1] & TONEW_MASK)) ||
             ((TypingWord[VSI] & TONEW_MASK) && CHR(VSI+1) == KEY_I) ||
-            ((TypingWord[VSI] & TONEW_MASK) && CHR(VSI+1) == KEY_A)){
+            ((TypingWord[VSI] & TONEW_MASK) && CHR(VSI+1) == KEY_A) ||
+            ((TypingWord[VSI+1] & TONEW_MASK) && ((CHR(VSI) == KEY_U && CHR(VSI+1) == KEY_O) || (CHR(VSI) == KEY_O && CHR(VSI+1) == KEY_A) || (CHR(VSI) == KEY_I && CHR(VSI+1) == KEY_O)))) {
             //restore and disable temporary
             hCode = vRestore;
             
@@ -971,12 +1078,12 @@ void insertW(const Uint16& data, const bool& isCaps) {
             hCode = vWillProcess;
             
             if ((CHR(VSI) == KEY_U && CHR(VSI+1) == KEY_O)) {
-                if (VSI - 2 >= 0 && TypingWord[VSI - 2] == KEY_T && TypingWord[VSI - 1] == KEY_H) {
+                if (VSI - 2 >= 0 && CHR(VSI - 2) == KEY_T && CHR(VSI - 1) == KEY_H) {
                     TypingWord[VSI+1] |= TONEW_MASK;
                     if (VSI + 2 < _index && CHR(VSI+2) == KEY_N) {
                         TypingWord[VSI] |= TONEW_MASK;
                     }
-                } else if (VSI - 1 >= 0 && TypingWord[VSI - 1] == KEY_Q) {
+                } else if (VSI - 1 >= 0 && CHR(VSI - 1) == KEY_Q) {
                     TypingWord[VSI+1] |= TONEW_MASK;
                 } else {
                     TypingWord[VSI] |= TONEW_MASK;
@@ -991,10 +1098,14 @@ void insertW(const Uint16& data, const bool& isCaps) {
                        (CHR(VSI) == KEY_O && CHR(VSI+1) == KEY_A)) {
                 TypingWord[VSI+1] |= TONEW_MASK;
             } else {
-                //don't do anything
+                //don't do anything: keep TONE_MASK intact so TypingWord matches screen
+                for (ii = VSI; ii <= VEI; ii++) {
+                    TypingWord[ii] |= savedTones[ii];
+                }
                 tempDisableKey = true;
                 isChanged = false;
                 hCode = vDoNothing;
+                return;
             }
             
             for (ii = VSI; ii < _index; ii++) {
@@ -1003,6 +1114,11 @@ void insertW(const Uint16& data, const bool& isCaps) {
         }
         
         return;
+    }
+    
+    //remove ^ tone
+    for (ii = VSI; ii <= VEI; ii++) {
+        TypingWord[ii] &= ~TONE_MASK;
     }
     
     hCode = vWillProcess;
@@ -1027,13 +1143,12 @@ void insertW(const Uint16& data, const bool& isCaps) {
                             TypingWord[ii] = KEY_O | ((TypingWord[ii] & CAPS_MASK) ? CAPS_MASK : 0);
                             isRestoredW = true;
                         }
-                        hData[_index - 1 - ii] = TypingWord[ii];
+                        hData[_index - 1 - ii] = GET(TypingWord[ii]) & ~STANDALONE_MASK;
                     } else {
                         hCode = vRestore;
                         TypingWord[ii] &= ~TONEW_MASK;
-                        hData[_index - 1 - ii] = TypingWord[ii];
+                        hData[_index - 1 - ii] = GET(TypingWord[ii]) & ~STANDALONE_MASK;
                         isRestoredW = true;
-                        //_index++;
                     }
                     
                     tempDisableKey = true;
@@ -1065,9 +1180,8 @@ void reverseLastStandaloneChar(const Uint32& keyCode, const bool& isCaps) {
     hData[0] = GET(TypingWord[_index - 1]);
 }
 
-static bool _afterDigit = false;   //the word started right after a digit: a lone w is a unit (100W), not ư (D33)
 void checkForStandaloneChar(const Uint16& data, const bool& isCaps, const Uint32& keyWillReverse) {
-    if (CHR(_index - 1) == keyWillReverse && TypingWord[_index - 1] & TONEW_MASK) {
+    if (_index > 0 && CHR(_index - 1) == keyWillReverse && (TypingWord[_index - 1] & TONEW_MASK)) {
         hCode = vWillProcess;
         hBPC = 1;
         hNCC = 1;
@@ -1534,14 +1648,21 @@ int vAutoSwitchLastSide = -1;
 static std::unordered_map<std::string, int>* _asBigrams = nullptr;   //loaded at run time (tests) instead of the built-in table
 static float _asBigramWeight = AS_BIGRAM_W;
 static int _asBigramMin = 3;
-static int asBuiltInPair(const std::string& key) {
+static int asBuiltInPair(const char* key) {
     int lo = 0, hi = kBigramCount - 1;
     while (lo <= hi) {
-        int mid = (lo + hi) / 2, c = strcmp(kBigramKeys + kBigramOffsets[mid], key.c_str());
+        int mid = (lo + hi) / 2, c = strcmp(kBigramKeys + kBigramOffsets[mid], key);
         if (c == 0) return (int)lround(exp2(kBigramLogCounts[mid] / 8.0));
         if (c < 0) lo = mid + 1; else hi = mid - 1;
     }
     return 0;
+}
+static int asBuiltInPair2(const char* a, const char* b) {
+    char buf[128];
+    size_t la = strlen(a), lb = strlen(b);
+    if (la + 1 + lb >= sizeof(buf)) return 0;
+    memcpy(buf, a, la); buf[la] = '\t'; memcpy(buf + la + 1, b, lb + 1);
+    return asBuiltInPair(buf);
 }
 void vAutoSwitchSetBigrams(const char* path, const float& weight, const int& minCount) {
     _asBigramWeight = weight; _asBigramMin = minCount;
@@ -1569,6 +1690,13 @@ static bool asSurface(const char* letters, const bool& vietnamese, std::string& 
     if (vAutoSwitchWordScore(1, letters, t, &n) <= AS_MISSING || n <= 0) return false;
     out = asUtf8(t, n); return true;
 }
+static std::string asResultUtf8(const Uint32* result, int resultCount) {
+    Uint16 t[MAX_BUFF];
+    for (int i = 0; i < resultCount; i++) {
+        t[i] = (result[i] & CHAR_CODE_MASK) ? (Uint16)(result[i] & 0xFFFF) : keyCodeToCharacter(result[i]);
+    }
+    return asUtf8(t, resultCount);
+}
 // Triples (D34, experiment): the two words before. Loaded at run time for now; off when not loaded.
 static std::unordered_map<std::string, int>* _asTrigrams = nullptr;
 static float _asTrigramWeight = 0;
@@ -1586,14 +1714,14 @@ void vAutoSwitchSetTrigrams(const char* path, const float& weight, const int& mi
     }
     fclose(f);
 }
-static bool asSurface(const char* letters, const bool& vietnamese, std::string& out);
 /** Like asBigramVote, with the two words before ("cho con" + bú/bus). 0 when the triple is too rare. */
-static int asTrigramVote(const char* p2Letters, const bool& p2Vietnamese, const char* p1Letters, const bool& p1Vietnamese, const char* letters) {
+static int asTrigramVote(const char* p2Letters, const bool& p2Vietnamese, const char* p1Letters, const bool& p1Vietnamese, const char* letters, const char* vnSurface = nullptr) {
     if (!_asTrigrams || _asTrigramWeight <= 0) return 0;
-    std::string a, b, vn;
-    if (!asSurface(p2Letters, p2Vietnamese, a) || !asSurface(p1Letters, p1Vietnamese, b) || !asSurface(letters, true, vn)) return 0;
-    auto get = [&](const std::string& w) { auto it = _asTrigrams->find(a + "\t" + b + "\t" + w); return it == _asTrigrams->end() ? 0 : it->second; };
-    int cv = get(vn), ce = get(letters);
+    std::string a, b, vnBuf;
+    if (!asSurface(p2Letters, p2Vietnamese, a) || !asSurface(p1Letters, p1Vietnamese, b)) return 0;
+    if (!vnSurface) { if (!asSurface(letters, true, vnBuf)) return 0; vnSurface = vnBuf.c_str(); }
+    auto get = [&](const char* w) { auto it = _asTrigrams->find(a + "\t" + b + "\t" + w); return it == _asTrigrams->end() ? 0 : it->second; };
+    int cv = get(vnSurface), ce = get(letters);
     if (cv + ce < _asTrigramMin) return 0;
     double v = 10 * log10((cv + 0.5) / (ce + 0.5));
     if (v > 30) v = 30; if (v < -30) v = -30;
@@ -1601,15 +1729,15 @@ static int asTrigramVote(const char* p2Letters, const bool& p2Vietnamese, const 
 }
 
 /** > 0: the Vietnamese reading follows prev more often, < 0: the English one (10 = 10x); 0: no data. */
-static int asBigramVote(const char* prevLetters, const bool& prevVietnamese, const char* letters) {
+static int asBigramVote(const char* prevLetters, const bool& prevVietnamese, const char* letters, const char* vnSurface = nullptr) {
     if (_asBigramWeight <= 0) return 0;
-    std::string p, vn;
-    if (!asSurface(prevLetters, prevVietnamese, p) || !asSurface(letters, true, vn)) return 0;
-    auto get = [&](const std::string& w) {
-        std::string key = p + "\t" + w;
-        if (!_asBigrams) return asBuiltInPair(key);
-        auto it = _asBigrams->find(key); return it == _asBigrams->end() ? 0 : it->second; };
-    int cv = get(vn), ce = get(letters);
+    std::string p, vnBuf;
+    if (!asSurface(prevLetters, prevVietnamese, p)) return 0;
+    if (!vnSurface) { if (!asSurface(letters, true, vnBuf)) return 0; vnSurface = vnBuf.c_str(); }
+    auto get = [&](const char* w) {
+        if (!_asBigrams) return asBuiltInPair2(p.c_str(), w);
+        auto it = _asBigrams->find(p + "\t" + w); return it == _asBigrams->end() ? 0 : it->second; };
+    int cv = get(vnSurface), ce = get(letters);
     if (cv + ce < _asBigramMin) return 0;
     double v = 10 * log10((cv + 0.5) / (ce + 0.5));
     if (v > 30) v = 30; if (v < -30) v = -30;
@@ -1661,15 +1789,15 @@ static int asCapVote(const char* letters) {
 #endif
 /** Look-forward (D35): the word after a word kept English. > 0 when the Vietnamese reading of the earlier word
  *  ("í", "cả") is followed by this word more often than the English one ("is", "car"); 0 without data. */
-static int asNextPairVote(const char* prevLetters, const char* nextLetters) {
+static int asNextPairVote(const char* prevLetters, const char* nextLetters, const char* prevSurface = nullptr, const char* nextSurface = nullptr) {
     if (_asBigramWeight <= 0) return 0;
-    std::string pv, nx;
-    if (!asSurface(prevLetters, true, pv) || !asSurface(nextLetters, true, nx)) return 0;
-    auto get = [&](const std::string& a) {
-        std::string key = a + "\t" + nx;
-        if (!_asBigrams) return asBuiltInPair(key);
-        auto it = _asBigrams->find(key); return it == _asBigrams->end() ? 0 : it->second; };
-    int cv = get(pv), ce = get(prevLetters);
+    std::string pvBuf, nxBuf;
+    if (!prevSurface) { if (!asSurface(prevLetters, true, pvBuf)) return 0; prevSurface = pvBuf.c_str(); }
+    if (!nextSurface) { if (!asSurface(nextLetters, true, nxBuf)) return 0; nextSurface = nxBuf.c_str(); }
+    auto get = [&](const char* a) {
+        if (!_asBigrams) return asBuiltInPair2(a, nextSurface);
+        auto it = _asBigrams->find(std::string(a) + "\t" + nextSurface); return it == _asBigrams->end() ? 0 : it->second; };
+    int cv = get(prevSurface), ce = get(prevLetters);
     if (cv + ce < _asBigramMin) return 0;
     double v = 10 * log10((cv + 0.5) / (ce + 0.5));
     if (v > 30) v = 30; if (v < -30) v = -30;
@@ -1965,11 +2093,15 @@ static bool asIsSwitchBreak(const vKeyEvent& event, const Uint16& data, const Ui
 struct AsEngineState {
     Uint32 word[MAX_BUFF], states[MAX_BUFF];
     Byte index, stateIndex;
-    bool tempDisable, useSpellingBefore, wordStartOk;
+    bool tempDisable, useSpellingBefore, wordStartOk, afterDigit;
     int dropN; int dropPos[AS_MAX_DROPS]; Uint32 dropKey[AS_MAX_DROPS];
-    int spaceCount, checkSpelling, language;
+    int spaceCount, checkSpelling, language, autoSwitchByTyping, rotationalTone;
+    int autoSwitchRequest, autoSwitchLastSide;
+    int doubleCount, doubleFirst; bool doubleBoth; Uint32 doubleKeys[MAX_BUFF];
+    Byte vowelCnt, vsi, vei, vwsm, spellingEnd;
+    bool spellingOk, spellingFlag, spellingVowelOk;
     vector<Uint32> longWord, special, statesData;
-    list<vector<Uint32>> typing;
+    deque<TypingStateSnapshot> typing;
     vKeyHookState hook;
 };
 
@@ -1978,10 +2110,15 @@ static void asSaveState(AsEngineState& st) {
     memcpy(st.states, KeyStates, sizeof(KeyStates));
     st.index = _index; st.stateIndex = _stateIndex;
     st.tempDisable = tempDisableKey; st.useSpellingBefore = _useSpellCheckingBefore;
-    st.wordStartOk = _asWordStartOk;
+    st.wordStartOk = _asWordStartOk; st.afterDigit = _afterDigit;
     st.dropN = _asDropN; memcpy(st.dropPos, _asDropPos, sizeof(_asDropPos)); memcpy(st.dropKey, _asDropKey, sizeof(_asDropKey));
     st.spaceCount = _spaceCount; st.checkSpelling = vCheckSpelling;
-    st.language = vLanguage;
+    st.language = vLanguage; st.autoSwitchByTyping = vAutoSwitchByTyping; st.rotationalTone = vRotationalTone;
+    st.autoSwitchRequest = vAutoSwitchRequest; st.autoSwitchLastSide = vAutoSwitchLastSide;
+    st.doubleCount = _asDoubleCount; st.doubleFirst = _asDoubleFirst; st.doubleBoth = _asDoubleBoth;
+    memcpy(st.doubleKeys, _asDoubleKeys, sizeof(_asDoubleKeys));
+    st.vowelCnt = vowelCount; st.vsi = vowelStartIndex; st.vei = vowelEndIndex; st.vwsm = vowelWillSetMark;
+    st.spellingOk = _spellingOK; st.spellingFlag = _spellingFlag; st.spellingVowelOk = _spellingVowelOK; st.spellingEnd = _spellingEndIndex;
     st.longWord.swap(_longWordHelper);
     st.special.swap(_specialChar);
     st.statesData.swap(_typingStatesData);
@@ -1994,10 +2131,15 @@ static void asRestoreState(AsEngineState& st) {
     memcpy(KeyStates, st.states, sizeof(KeyStates));
     _index = st.index; _stateIndex = st.stateIndex;
     tempDisableKey = st.tempDisable; _useSpellCheckingBefore = st.useSpellingBefore;
-    _asWordStartOk = st.wordStartOk;
+    _asWordStartOk = st.wordStartOk; _afterDigit = st.afterDigit;
     _asDropN = st.dropN; memcpy(_asDropPos, st.dropPos, sizeof(_asDropPos)); memcpy(_asDropKey, st.dropKey, sizeof(_asDropKey));
     _spaceCount = st.spaceCount; vCheckSpelling = st.checkSpelling;
-    vLanguage = st.language;
+    vLanguage = st.language; vAutoSwitchByTyping = st.autoSwitchByTyping; vRotationalTone = st.rotationalTone;
+    vAutoSwitchRequest = st.autoSwitchRequest; vAutoSwitchLastSide = st.autoSwitchLastSide;
+    _asDoubleCount = st.doubleCount; _asDoubleFirst = st.doubleFirst; _asDoubleBoth = st.doubleBoth;
+    memcpy(_asDoubleKeys, st.doubleKeys, sizeof(_asDoubleKeys));
+    vowelCount = st.vowelCnt; vowelStartIndex = st.vsi; vowelEndIndex = st.vei; vowelWillSetMark = st.vwsm;
+    _spellingOK = st.spellingOk; _spellingFlag = st.spellingFlag; _spellingVowelOK = st.spellingVowelOk; _spellingEndIndex = st.spellingEnd;
     _longWordHelper.swap(st.longWord);
     _specialChar.swap(st.special);
     _typingStatesData.swap(st.statesData);
@@ -2019,6 +2161,9 @@ static int asReplay(const Uint32* keys, const int& count, Uint32* result, int& r
     AsEngineState saved;
     asSaveState(saved);
     _spaceCount = 0;
+    vAutoSwitchByTyping = 0;
+    vCheckSpelling = 1;
+    vRotationalTone = 0;
     startNewSession();
     for (int x = 0; x < count; x++) {
         vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, (Uint16)(keys[x] & CHAR_MASK), (keys[x] & CAPS_MASK) ? 1 : 0, false);
@@ -2065,6 +2210,9 @@ bool vAutoSwitchCheckEnglishWord(const Uint32* keys, const int& count,
     Uint32 result[MAX_BUFF];
     int resultCount;
     int vn = asReplay(keys, count, result, resultCount);
+    std::string vnSurface;
+    if (vn != AS_MISSING && resultCount > 0) vnSurface = asResultUtf8(result, resultCount);
+    const char* vnSurfPtr = vnSurface.empty() ? nullptr : vnSurface.c_str();
     //word pairs (D30): "cho con bus" -> bú, "the bus" stays
     int pairVote = 0;
     if ((_asBigramWeight > 0 || _asTrigrams) && en != AS_MISSING && vn != AS_MISSING && previousN >= 1 && previousCounts[0] >= 1) {
@@ -2072,8 +2220,8 @@ bool vAutoSwitchCheckEnglishWord(const Uint32* keys, const int& count,
         char p2raw[AS_KEY_LEN];
         if (asRawWord(previous[0], previousCounts[0], praw)) {
             if (previousN >= 2 && previousCounts[1] >= 1 && asRawWord(previous[1], previousCounts[1], p2raw))
-                pairVote = asTrigramVote(p2raw, false, praw, false, raw);
-            if (pairVote == 0) pairVote = asBigramVote(praw, false, raw);
+                pairVote = asTrigramVote(p2raw, false, praw, false, raw, vnSurfPtr);
+            if (pairVote == 0) pairVote = asBigramVote(praw, false, raw, vnSurfPtr);
         }
     }
     int capVote = 0;   //D37: a capitalised word mid-sentence goes with the capitalised reading real text uses
@@ -2102,13 +2250,17 @@ bool vAutoSwitchCheckEnglishWord(const Uint32* keys, const int& count,
 #ifndef AS_PAIR_OVERRIDES_D22
 #define AS_PAIR_OVERRIDES_D22 10   //word pairs this sure of the Vietnamese reading (10x) beat D22: "team bên US" (D34)
 #endif
+    bool hasCachedPrev0 = false;
+    int cachedPrev0Pen = AS_MISSING, cachedPrev0Pvn = AS_MISSING;
+    bool cachedPrev0Changed = false;
+    Uint32 cachedPrev0Out[MAX_BUFF]; int cachedPrev0OutCount = 0;
     if (en != AS_MISSING && previousN >= 1 && previousCounts[0] >= 1 && pairVote < AS_PAIR_OVERRIDES_D22 && !vAutoSwitchPrevRestored && capVote < AS_CAP_MARGIN) {
         char praw[AS_KEY_LEN];
-        Uint32 tmp[MAX_BUFF]; int tmpCount;
         if (asRawWord(previous[0], previousCounts[0], praw)) {
-            int pen = asEnglishScore(praw);
-            int pvn = asReplay(previous[0], previousCounts[0], tmp, tmpCount);
-            if (pen != AS_MISSING && (pvn == AS_MISSING || pen - pvn >= AS_PREFER)) return false;
+            cachedPrev0Pen = asEnglishScore(praw);
+            cachedPrev0Pvn = asReplay(previous[0], previousCounts[0], cachedPrev0Out, cachedPrev0OutCount, &cachedPrev0Changed);
+            hasCachedPrev0 = true;
+            if (cachedPrev0Pen != AS_MISSING && (cachedPrev0Pvn == AS_MISSING || cachedPrev0Pen - cachedPrev0Pvn >= AS_PREFER)) return false;
         }
     }
 
@@ -2123,19 +2275,35 @@ bool vAutoSwitchCheckEnglishWord(const Uint32* keys, const int& count,
         int pc = previousCounts[back];
         char praw[AS_KEY_LEN];
         if (pc < 2 || !asRawWord(pk, pc, praw) || !asFewCapitals(pk, pc)) break;
-        int pen = asEnglishScore(praw);
+        int pen, pvn;
         bool changed;
-        int pvn = asReplay(pk, pc, earlier[back], earlierCount[back], &changed);
+        if (back == 0 && hasCachedPrev0) {
+            pen = cachedPrev0Pen;
+            pvn = cachedPrev0Pvn;
+            changed = cachedPrev0Changed;
+            earlierCount[0] = cachedPrev0OutCount;
+            if (cachedPrev0OutCount > 0) memcpy(earlier[0], cachedPrev0Out, cachedPrev0OutCount * sizeof(Uint32));
+        } else {
+            pen = asEnglishScore(praw);
+            pvn = asReplay(pk, pc, earlier[back], earlierCount[back], &changed);
+        }
         earlierSame[back] = !changed;
         if (!changed) {           //looks the same in both modes: pass through Vietnamese-only words ("cho")
             if (pen != AS_MISSING || asVietnameseScore(praw) == AS_MISSING) break;
             earlierCount[back] = pc;
             for (int x = 0; x < pc; x++) earlier[back][x] = pk[x];
-        } else if (pen == AS_MISSING || pvn == AS_MISSING ||
-                   (back == 0 && vAutoSwitchPrevRestored ? asNextPairVote(praw, raw) < AS_NEXT_PAIR :   //switched on purpose: only strong evidence
-                    (pvn < pen - AS_LOOKBACK_MARGIN && !(back == 0 && asNextPairVote(praw, raw) >= AS_NEXT_PAIR)))) {
-            break;                //only ambiguous words that were kept English follow the switch (or, D35, ones the
-                                  //word after them clearly reads as Vietnamese: "em í ạ", "hết cả mood")
+        } else if (pen == AS_MISSING || pvn == AS_MISSING) {
+            break;
+        } else {
+            int npv = 0;
+            if (back == 0) {
+                std::string prevSurf = asResultUtf8(earlier[0], earlierCount[0]);
+                npv = asNextPairVote(praw, raw, prevSurf.empty() ? nullptr : prevSurf.c_str(), vnSurfPtr);
+            }
+            if (back == 0 && vAutoSwitchPrevRestored ? (npv < AS_NEXT_PAIR) :
+                (pvn < pen - AS_LOOKBACK_MARGIN && !(back == 0 && npv >= AS_NEXT_PAIR))) {
+                break;
+            }
         }
         if (resultCount + n + earlierCount[back] + 1 >= MAX_BUFF || deleteCount + pc + 1 >= MAX_BUFF) break;
         n += earlierCount[back] + 1;
@@ -2190,7 +2358,7 @@ void vKeyHandleEvent(const vKeyEvent& event,
         _asApostrophe = false;
         if (asSwitch) {
             asRestoreToEnglish(vRestoreAndStartNewSession); //auto switch: an English word typed in Vietnamese mode
-        } else if (vRestoreIfWrongSpelling && isWordBreak(event, state, data)) { //restore key if wrong spelling with break-key
+        } else if (!otherControlKey && event != vKeyEvent::Mouse && vRestoreIfWrongSpelling && isWordBreak(event, state, data)) { //restore key if wrong spelling with break-key
             if (!tempDisableKey && vCheckSpelling) {
                 checkSpelling(true); //force check spelling
             }
@@ -2214,7 +2382,7 @@ void vKeyHandleEvent(const vKeyEvent& event,
             hExt = 3;//normal word
         }
         
-        if (hCode == vDoNothing) {
+        if (hCode == vDoNothing || event == vKeyEvent::Mouse) {
             startNewSession();
             vCheckSpelling = _useSpellCheckingBefore;
         }
@@ -2368,7 +2536,7 @@ void vKeyHandleEvent(const vKeyEvent& event,
         }
         
         //case [ ]
-        if (IS_BRACKET_KEY(data) && IS_BRACKET_KEY((Uint16)hData[0])) {
+        if (hCode != vDoNothing && IS_BRACKET_KEY(data) && IS_BRACKET_KEY((Uint16)hData[0])) {
             if (_index - (hCode == vWillProcess ? hBPC : 0) > 0) {
                 _index--;
                 saveWord();
@@ -2509,6 +2677,7 @@ int vAutoSwitchWordScore(const int& vietnamese, const char* letters, Uint16* ren
 }
 
 int vAutoSwitchCompletions(const int& vietnamese, const char* prefix, char out[][32], int* scores, const int& maxOut) {
+    if (!prefix || !out || !scores || maxOut <= 0) return 0;
     const char* words = vietnamese ? kAutoSwitchVnWords : kAutoSwitchEnWords;
     const unsigned int* offsets = vietnamese ? kAutoSwitchVnOffsets : kAutoSwitchEnOffsets;
     const signed char* sc = vietnamese ? kAutoSwitchVnScores : kAutoSwitchEnScores;
@@ -2531,18 +2700,21 @@ int vAutoSwitchCompletions(const int& vietnamese, const char* prefix, char out[]
 }
 
 bool vAutoSwitchIsVietnameseSpelling(const char* letters) {
+    if (!letters) return false;
     int n = (int)strlen(letters);
-    if (n == 0 || n >= AS_KEY_LEN - 1) return false;
-    Uint32 keys[AS_KEY_LEN];
+    if (n == 0 || n >= MAX_BUFF - 1) return false;
+    Uint32 keys[MAX_BUFF];
     for (int i = 0; i < n; i++) { keys[i] = asKeyOfLetter(letters[i]); if (!keys[i] && letters[i] != 'a') return false; }
     AsEngineState saved;
     asSaveState(saved);
     _spaceCount = 0;
+    vAutoSwitchByTyping = 0;
+    vCheckSpelling = 1;
+    vRotationalTone = 0;
     startNewSession();
     for (int x = 0; x < n; x++) vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, (Uint16)keys[x], 0, false);
-    bool savedTemp = tempDisableKey;
     checkSpelling(true);
-    bool valid = !tempDisableKey && !savedTemp;
+    bool valid = !tempDisableKey;
     asRestoreState(saved);
     return valid;
 }

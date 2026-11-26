@@ -25,7 +25,7 @@
 namespace vikey { namespace updater {
 
 #ifndef HKEY_VERSION
-#define HKEY_VERSION "1.0.28"
+#define HKEY_VERSION "1.2.1"
 #endif
 
 #define WIDEN2(x) L ## x
@@ -52,8 +52,9 @@ struct Release {
     bool isInstaller = false;
 };
 
-static HWND _owner = nullptr;
+static std::atomic<HWND> _owner{nullptr};
 static std::atomic<bool> _busy{false};
+static std::atomic<bool> _stopping{false};
 static std::mutex _stateMu;
 static Release _found;
 static std::wstring _pendingPath;
@@ -140,35 +141,99 @@ static int compareVersions(const std::wstring& a, const std::wstring& b) {
     return 0;
 }
 
-static std::string jsonValue(const std::string& json, const std::string& key) {
-    std::string pattern = "\"" + key + "\":";
-    size_t pos = json.find(pattern);
-    if (pos == std::string::npos) return "";
-    pos += pattern.size();
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n')) pos++;
-    if (pos >= json.size()) return "";
-    if (json[pos] == '"') {
-        pos++;
-        std::string val;
-        while (pos < json.size() && json[pos] != '"') {
-            if (json[pos] == '\\' && pos + 1 < json.size()) {
-                pos++;
-                if (json[pos] == 'n') val += '\n';
-                else if (json[pos] == 'r') val += '\r';
-                else if (json[pos] == 't') val += '\t';
-                else if (json[pos] == '"') val += '"';
-                else if (json[pos] == '\\') val += '\\';
-                else val += json[pos];
-            } else {
-                val += json[pos];
-            }
-            pos++;
+static std::wstring sanitizeVersion(const std::wstring& v) {
+    std::wstring out;
+    out.reserve(v.size());
+    for (wchar_t c : v) {
+        if ((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || c == L'.' || c == L'_' || c == L'-') {
+            out.push_back(c);
         }
-        return val;
     }
-    size_t end = json.find_first_of(",}\r\n", pos);
-    if (end == std::string::npos) end = json.size();
-    return json.substr(pos, end - pos);
+    if (out.empty() || out.find(L"..") != std::wstring::npos) return L"";
+    return out;
+}
+
+static size_t skipJsonWs(const std::string& s, size_t i) {
+    while (i < s.size() && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++;
+    return i;
+}
+
+static std::string parseJsonString(const std::string& s, size_t& pos) {
+    if (pos >= s.size() || s[pos] != '"') return "";
+    pos++;
+    std::string val;
+    while (pos < s.size() && s[pos] != '"') {
+        if (s[pos] == '\\' && pos + 1 < s.size()) {
+            pos++;
+            char c = s[pos];
+            if (c == 'n') val += '\n';
+            else if (c == 'r') val += '\r';
+            else if (c == 't') val += '\t';
+            else if (c == '"' || c == '\\' || c == '/') val += c;
+            else if (c == 'u' && pos + 4 < s.size()) {
+                char hex[5] = {s[pos + 1], s[pos + 2], s[pos + 3], s[pos + 4], 0};
+                unsigned cp = (unsigned)strtoul(hex, nullptr, 16);
+                pos += 4;
+                if (cp < 0x80) val += (char)cp;
+                else if (cp < 0x800) { val += (char)(0xC0 | (cp >> 6)); val += (char)(0x80 | (cp & 0x3F)); }
+                else { val += (char)(0xE0 | (cp >> 12)); val += (char)(0x80 | ((cp >> 6) & 0x3F)); val += (char)(0x80 | (cp & 0x3F)); }
+            } else {
+                val += c;
+            }
+        } else {
+            val += s[pos];
+        }
+        pos++;
+    }
+    if (pos < s.size() && s[pos] == '"') pos++;
+    return val;
+}
+
+static size_t skipJsonValue(const std::string& s, size_t pos) {
+    pos = skipJsonWs(s, pos);
+    if (pos >= s.size()) return pos;
+    if (s[pos] == '"') { parseJsonString(s, pos); return pos; }
+    if (s[pos] == '{' || s[pos] == '[') {
+        char open = s[pos], close = (open == '{') ? '}' : ']';
+        int depth = 0; bool inStr = false; bool esc = false;
+        for (; pos < s.size(); pos++) {
+            char c = s[pos];
+            if (esc) { esc = false; continue; }
+            if (c == '\\' && inStr) { esc = true; continue; }
+            if (c == '"') { inStr = !inStr; continue; }
+            if (!inStr) {
+                if (c == open) depth++;
+                else if (c == close && --depth == 0) return pos + 1;
+            }
+        }
+        return pos;
+    }
+    while (pos < s.size() && s[pos] != ',' && s[pos] != '}' && s[pos] != ']' && s[pos] != ' ' && s[pos] != '\r' && s[pos] != '\n' && s[pos] != '\t') pos++;
+    return pos;
+}
+
+/// Extracts a top-level field from a JSON object `{ ... }`, ignoring nested objects/strings.
+static std::string jsonValue(const std::string& obj, const std::string& targetKey) {
+    size_t i = skipJsonWs(obj, 0);
+    if (i >= obj.size() || obj[i] != '{') return "";
+    i++;
+    while (i < obj.size()) {
+        i = skipJsonWs(obj, i);
+        if (i >= obj.size() || obj[i] == '}') break;
+        if (obj[i] == ',') { i++; continue; }
+        if (obj[i] != '"') break;
+        std::string key = parseJsonString(obj, i);
+        i = skipJsonWs(obj, i);
+        if (i >= obj.size() || obj[i] != ':') break;
+        i = skipJsonWs(obj, i + 1);
+        if (key == targetKey) {
+            if (i < obj.size() && obj[i] == '"') return parseJsonString(obj, i);
+            size_t end = skipJsonValue(obj, i);
+            return obj.substr(i, end - i);
+        }
+        i = skipJsonValue(obj, i);
+    }
+    return "";
 }
 
 static size_t findMatchingBrace(const std::string& str, size_t start) {
@@ -178,7 +243,7 @@ static size_t findMatchingBrace(const std::string& str, size_t start) {
     for (size_t i = start; i < str.size(); i++) {
         char c = str[i];
         if (escape) { escape = false; continue; }
-        if (c == '\\') { escape = true; continue; }
+        if (c == '\\' && inString) { escape = true; continue; }
         if (c == '"') { inString = !inString; continue; }
         if (!inString) {
             if (c == '{') depth++;
@@ -224,7 +289,8 @@ static bool parseGitHubRelease(const std::string& json, Release& out) {
     std::string tag = jsonValue(json, "tag_name");
     if (tag.empty()) return false;
     if (tag.front() == 'v' || tag.front() == 'V') tag.erase(0, 1);
-    out.version = widen(tag);
+    out.version = sanitizeVersion(widen(tag));
+    if (out.version.empty()) return false;
     out.releasePage = widen(jsonValue(json, "html_url"));
     if (out.releasePage.empty()) {
         std::wstring repo = prefs::getString(L"GitHubRepo", DEFAULT_REPO);
@@ -236,51 +302,48 @@ static bool parseGitHubRelease(const std::string& json, Release& out) {
     const std::string archStr = narrow(ARCH);
     int bestRank = 0;
 
-    size_t aPos = json.find("\"assets\":");
-    if (aPos != std::string::npos) {
-        size_t arrStart = json.find('[', aPos);
-        if (arrStart != std::string::npos) {
-            size_t cur = arrStart + 1;
-            while (cur < json.size()) {
-                size_t objStart = json.find('{', cur);
-                if (objStart == std::string::npos) break;
-                size_t objEnd = findMatchingBrace(json, objStart);
-                if (objEnd == std::string::npos) break;
-                std::string assetObj = json.substr(objStart, objEnd - objStart + 1);
-                std::string name = jsonValue(assetObj, "name");
-                std::string downloadUrl = jsonValue(assetObj, "browser_download_url");
-                std::string sizeStr = jsonValue(assetObj, "size");
-                std::string digestSha = extractDigestSha256(jsonValue(assetObj, "digest"));
+    std::string assetsJson = jsonValue(json, "assets");
+    if (!assetsJson.empty() && assetsJson.front() == '[') {
+        size_t cur = 1;
+        while (cur < assetsJson.size()) {
+            size_t objStart = assetsJson.find('{', cur);
+            if (objStart == std::string::npos) break;
+            size_t objEnd = findMatchingBrace(assetsJson, objStart);
+            if (objEnd == std::string::npos) break;
+            std::string assetObj = assetsJson.substr(objStart, objEnd - objStart + 1);
+            std::string name = jsonValue(assetObj, "name");
+            std::string downloadUrl = jsonValue(assetObj, "browser_download_url");
+            std::string sizeStr = jsonValue(assetObj, "size");
+            std::string digestSha = extractDigestSha256(jsonValue(assetObj, "digest"));
 
-                if (isHttpsUrl(downloadUrl)) {
-                    if (name == "SHA256SUMS.txt") {
-                        out.sha256Url = widen(downloadUrl);
+            if (isHttpsUrl(downloadUrl)) {
+                if (name == "SHA256SUMS.txt") {
+                    out.sha256Url = widen(downloadUrl);
+                } else {
+                    bool archMatch = (name.find(archStr) != std::string::npos);
+                    bool isSetup = endsWith(name, "-Setup.exe") || (name.find("Setup.exe") != std::string::npos);
+                    bool isExe = endsWith(name, ".exe");
+
+                    int rank = 0;
+                    bool candidateInstaller = false;
+                    if (installed) {
+                        if (archMatch && isSetup) { rank = 2; candidateInstaller = true; }
                     } else {
-                        bool archMatch = (name.find(archStr) != std::string::npos);
-                        bool isSetup = endsWith(name, "-Setup.exe") || (name.find("Setup.exe") != std::string::npos);
-                        bool isExe = endsWith(name, ".exe");
+                        if (archMatch && isExe && !isSetup) { rank = 2; candidateInstaller = false; }
+                        else if (archStr == "x64" && name == "HKey.exe") { rank = 1; candidateInstaller = false; }
+                    }
 
-                        int rank = 0;
-                        bool candidateInstaller = false;
-                        if (installed) {
-                            if (archMatch && isSetup) { rank = 2; candidateInstaller = true; }
-                        } else {
-                            if (archMatch && isExe && !isSetup) { rank = 2; candidateInstaller = false; }
-                            else if (archStr == "x64" && name == "HKey.exe") { rank = 1; candidateInstaller = false; }
-                        }
-
-                        if (rank > bestRank) {
-                            bestRank = rank;
-                            out.assetName = name;
-                            out.url = widen(downloadUrl);
-                            out.length = _strtoui64(sizeStr.c_str(), nullptr, 10);
-                            out.sha256 = digestSha;
-                            out.isInstaller = candidateInstaller;
-                        }
+                    if (rank > bestRank) {
+                        bestRank = rank;
+                        out.assetName = name;
+                        out.url = widen(downloadUrl);
+                        out.length = _strtoui64(sizeStr.c_str(), nullptr, 10);
+                        out.sha256 = digestSha;
+                        out.isInstaller = candidateInstaller;
                     }
                 }
-                cur = objEnd + 1;
             }
+            cur = objEnd + 1;
         }
     }
     return !out.url.empty();
@@ -301,6 +364,7 @@ static bool httpGet(const std::wstring& url, std::vector<unsigned char>& out, in
     HINTERNET s = WinHttpOpen(L"HKey/" HKEY_VERSION_W, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (!s) return false;
 
+    WinHttpSetTimeouts(s, 10000, 10000, 15000, 30000);
     DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(s, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy, sizeof(redirectPolicy));
 
@@ -440,9 +504,10 @@ static bool verifySignatureNotTampered(const std::wstring& filePath) {
     winTrustData.dwStateAction = WTD_STATEACTION_CLOSE;
     WinVerifyTrust(nullptr, &action, &winTrustData);
 
-    // CI builds are unsigned (TRUST_E_NOSIGNATURE) or self-signed (CERT_E_UNTRUSTEDROOT);
-    // SHA-256 verifies integrity, and Authenticode only rejects explicit signature tampering.
-    return status != TRUST_E_BAD_DIGEST && status != TRUST_E_EXPLICIT_DISTRUST;
+    return status != TRUST_E_BAD_DIGEST &&
+           status != TRUST_E_EXPLICIT_DISTRUST &&
+           status != CERT_E_REVOKED &&
+           status != CERT_E_EXPIRED;
 }
 
 static bool verifyPeAndHash(const unsigned char* data, size_t size, const std::string& expectedSha256) {
@@ -533,6 +598,10 @@ static bool download(Release& r, std::wstring& errOut) {
     }
 
     std::wstring path = stagedFilePath(r);
+    if (!isPathInUpdatesDir(path)) {
+        errOut = L"Đường dẫn file cập nhật không hợp lệ.";
+        return false;
+    }
     std::ofstream f(path.c_str(), std::ios::binary | std::ios::trunc);
     f.write((const char*)file.data(), file.size());
     f.close();
@@ -683,6 +752,30 @@ int handleUpdateCommandLine(LPWSTR) {
 }
 
 // ---- checks ---------------------------------------------------------------------------------------
+static long long getLastUpdateCheck() {
+    std::wstring s = prefs::getString(L"LastUpdateCheck64", L"");
+    if (!s.empty()) return std::wcstoll(s.c_str(), nullptr, 10);
+    return (long long)prefs::getInt(L"LastUpdateCheck", 0);
+}
+
+static void setLastUpdateCheck(long long ts) {
+    prefs::setString(L"LastUpdateCheck64", std::to_wstring(ts));
+}
+
+static void cleanupStaleUpdates(const std::wstring& keepPath) {
+    std::wstring dir = updatesDir();
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW((dir + L"\\HKey-*.exe").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring full = dir + L"\\" + fd.cFileName;
+        if (!keepPath.empty() && _wcsicmp(full.c_str(), keepPath.c_str()) == 0) continue;
+        DeleteFileW(full.c_str());
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
 static void checkThread(bool manual) {
     std::wstring repo = prefs::getString(L"GitHubRepo", DEFAULT_REPO);
     std::wstring apiUrl = L"https://api.github.com/repos/" + repo + L"/releases/latest";
@@ -693,7 +786,7 @@ static void checkThread(bool manual) {
     Release foundRel;
 
     if (httpGet(apiUrl, data, statusCode, 4 << 20)) {
-        prefs::setInt(L"LastUpdateCheck", (int)time(nullptr));
+        setLastUpdateCheck((long long)time(nullptr));
         if (statusCode == 404 || data.empty()) {
             ev = EvUpToDate;
         } else {
@@ -719,11 +812,14 @@ static void checkThread(bool manual) {
         _lastError = err;
     }
     _busy = false;
-    PostMessageW(_owner, WM_UPDATER, ev, manual ? 1 : 0);
+    HWND owner = _owner.load(std::memory_order_relaxed);
+    if (!_stopping.load(std::memory_order_relaxed) && owner && IsWindow(owner)) {
+        PostMessageW(owner, WM_UPDATER, ev, manual ? 1 : 0);
+    }
 }
 
 static void check(bool manual) {
-    if (_busy.exchange(true)) return;
+    if (_stopping.load(std::memory_order_relaxed) || _busy.exchange(true)) return;
     std::thread(checkThread, manual).detach();
 }
 
@@ -740,9 +836,10 @@ static bool applyAndClose(const Release& rel, bool silent) {
     if (prefs::has(L"PendingUpdateIsInstaller")) isInst = prefs::getInt(L"PendingUpdateIsInstaller", 0) != 0;
 
     std::wstring err;
-    forgetPending();
     if (launchPendingUpdate(path, sha, isInst, silent, true, err)) {
-        PostMessageW(_owner, WM_CLOSE, 0, 0);
+        forgetPending();
+        HWND owner = _owner.load(std::memory_order_relaxed);
+        if (owner && IsWindow(owner)) PostMessageW(owner, WM_CLOSE, 0, 0);
         return true;
     }
     MessageBoxW(nullptr, err.empty() ? L"Không chạy được bản cập nhật." : err.c_str(), L"HKey", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
@@ -815,7 +912,10 @@ void onEvent(WPARAM ev, LPARAM lp) {
                     _lastError = dlErr;
                 }
                 _busy = false;
-                PostMessageW(_owner, WM_UPDATER, ok ? EvDownloaded : EvFailed, 1);
+                HWND owner = _owner.load(std::memory_order_relaxed);
+                if (!_stopping.load(std::memory_order_relaxed) && owner && IsWindow(owner)) {
+                    PostMessageW(owner, WM_UPDATER, ok ? EvDownloaded : EvFailed, 1);
+                }
             }).detach();
         } else {
             ShellExecuteW(nullptr, L"open", rel.releasePage.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -830,31 +930,36 @@ void onEvent(WPARAM ev, LPARAM lp) {
 static const UINT_PTR TIMER_UPDATE = 0x7001;
 static void CALLBACK timerProc(HWND, UINT, UINT_PTR, DWORD) {
     if (!prefs::getInt(L"AutoUpdate", 1)) return;
-    int last = prefs::getInt(L"LastUpdateCheck", 0);
-    if (time(nullptr) - last >= 24 * 3600) check(false);
+    long long last = getLastUpdateCheck();
+    if ((long long)time(nullptr) - last >= 24LL * 3600) check(false);
 }
 
 void start(HWND owner) {
-    _owner = owner;
+    _stopping.store(false, std::memory_order_relaxed);
+    _owner.store(owner, std::memory_order_relaxed);
     std::wstring staleOld = currentExePath() + L".old";
     if (fileExists(staleOld)) DeleteFileW(staleOld.c_str());
 
     std::wstring pending = prefs::getString(L"PendingUpdatePath", L"");
-    if (!pending.empty() && !fileExists(pending)) forgetPending();
-    else {
+    if (!pending.empty() && !fileExists(pending)) {
+        forgetPending();
+        pending.clear();
+    } else {
         std::lock_guard<std::mutex> lk(_stateMu);
         _pendingPath = pending;
     }
+    cleanupStaleUpdates(pending);
 
     SetTimer(owner, TIMER_UPDATE, 60 * 60 * 1000, timerProc);
     std::thread([] {
         Sleep(20000);
-        if (prefs::getInt(L"AutoUpdate", 1) && time(nullptr) - prefs::getInt(L"LastUpdateCheck", 0) >= 24 * 3600) check(false);
+        if (_stopping.load(std::memory_order_relaxed)) return;
+        if (prefs::getInt(L"AutoUpdate", 1) && (long long)time(nullptr) - getLastUpdateCheck() >= 24LL * 3600) check(false);
     }).detach();
 }
 
 void checkNow(HWND owner) {
-    _owner = owner;
+    _owner.store(owner, std::memory_order_relaxed);
     check(true);
 }
 
@@ -879,8 +984,11 @@ static bool installPending(bool relaunch) {
     }
 
     std::wstring err;
-    forgetPending();
-    return launchPendingUpdate(p, sha, isInst, true, relaunch, err);
+    if (launchPendingUpdate(p, sha, isInst, true, relaunch, err)) {
+        forgetPending();
+        return true;
+    }
+    return false;
 }
 
 bool installPendingAndQuit() {

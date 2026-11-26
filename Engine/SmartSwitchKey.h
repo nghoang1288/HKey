@@ -13,7 +13,7 @@
 #include <string>
 #include <vector>
 
-using namespace std;
+// using namespace std removed from header
 
 void initSmartSwitchKey(const Byte* pData, const int& size);
 void sanitizeSmartSwitchKeyEntries(const std::vector<std::string>& browserExeList);
@@ -21,7 +21,7 @@ void sanitizeSmartSwitchKeyEntries(const std::vector<std::string>& browserExeLis
 /**
  * convert all data to save on disk
  */
-void getSmartSwitchKeySaveData(vector<Byte>& outData);
+void getSmartSwitchKeySaveData(std::vector<Byte>& outData);
 
 /**
  * find and get language input method, if don't has set @currentInputMethod value for this app
@@ -30,11 +30,11 @@ void getSmartSwitchKeySaveData(vector<Byte>& outData);
  * 0: English
  * 1: Vietnamese
  */
-int getAppInputMethodStatus(const string& bundleId, const int& currentInputMethod);
+int getAppInputMethodStatus(const std::string& bundleId, const int& currentInputMethod);
 
 /**
  * Set default language for this @bundleId
  */
-void setAppInputMethodStatus(const string& bundleId, const int& language);
+void setAppInputMethodStatus(const std::string& bundleId, const int& language);
 
 #endif /* SmartSwitchKey_h */

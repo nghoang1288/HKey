@@ -18,7 +18,7 @@ int wmain() {
 
     // 1. Initialize
     vikey::macro::init();
-    vikey::macro::setEnabled(true);
+    vikey::macro::setEnabled(true, false);
     std::map<std::wstring, std::wstring> fixture = {
         {L"k", L"không"},
         {L"dc", L"được"},
@@ -149,6 +149,32 @@ int wmain() {
     vikey::macro::onChar(L'c');
     TEST_ASSERT(vikey::macro::match(repl, len, true));
     TEST_ASSERT(repl == L"được");
+
+    // 14. Unicode Title Case & All-Caps on Vietnamese shortcut: "Đc" -> "Đồng chí", "ĐC" -> "ĐỒNG CHÍ"
+    vikey::macro::reset();
+    vikey::macro::onChar(L'Đ');
+    vikey::macro::onChar(L'c');
+    TEST_ASSERT(vikey::macro::match(repl, len, true));
+    TEST_ASSERT(repl == L"Đồng chí");
+
+    vikey::macro::reset();
+    vikey::macro::onChar(L'Đ');
+    vikey::macro::onChar(L'C');
+    TEST_ASSERT(vikey::macro::match(repl, len, true));
+    TEST_ASSERT(repl == L"ĐỒNG CHÍ");
+
+    // 15. Internal capitalization preserved when lowercase trigger: "vn" -> "Việt Nam", "VN" -> "VIỆT NAM"
+    vikey::macro::reset();
+    vikey::macro::onChar(L'v');
+    vikey::macro::onChar(L'n');
+    TEST_ASSERT(vikey::macro::match(repl, len, true));
+    TEST_ASSERT(repl == L"Việt Nam");
+
+    vikey::macro::reset();
+    vikey::macro::onChar(L'V');
+    vikey::macro::onChar(L'N');
+    TEST_ASSERT(vikey::macro::match(repl, len, true));
+    TEST_ASSERT(repl == L"VIỆT NAM");
 
     std::cout << "All Vikey Macro unit tests PASSED successfully!" << std::endl;
     return 0;

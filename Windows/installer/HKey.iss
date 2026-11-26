@@ -1,7 +1,7 @@
 ; HKey for Windows installer (Inno Setup 6). Per-user, no admin prompt, so the app can update itself.
-;   iscc /DVersion=1.0.28 /DArch=x64 /DSrc=..\build\App HKey.iss
+;   iscc /DVersion=1.1 /DArch=x64 /DSrc=..\build\App HKey.iss
 #ifndef Version
-  #define Version "1.0.28"
+  #define Version "1.2.1"
 #endif
 #ifndef Arch
   #define Arch "x64"
@@ -69,10 +69,17 @@ Name: "{userdesktop}\HKey"; Filename: "{app}\HKey.exe"; Tasks: desktopicon
 [Tasks]
 Name: "desktopicon"; Description: "Tạo biểu tượng trên màn hình nền (Desktop)"; Flags: unchecked
 
+[Registry]
+; Remove "Mở HKey khi đăng nhập" autorun entry on uninstall
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueName: "HKey"; Flags: uninsdeletevalue dontcreatekey
+
 [Run]
 Filename: "{app}\HKey.exe"; Description: "Mở HKey"; Flags: nowait postinstall skipifsilent
 ; a self-update (HKey runs the installer silently with /RELAUNCH=1) brings the app back
 Filename: "{app}\HKey.exe"; Flags: nowait; Check: ShouldRelaunch
+
+[UninstallRun]
+Filename: "{sys}\taskkill.exe"; Parameters: "/IM HKey.exe /F"; Flags: runhidden; RunOnceId: "KillHKey"
 
 [Code]
 function ShouldRelaunch: Boolean;

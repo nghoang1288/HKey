@@ -71,7 +71,6 @@ inline Uint16 engineKey(DWORD vk) {
         }
         // keys the engine treats as word breaks (it has no code of its own for them): act like Esc
         case VK_INSERT: case VK_HOME: case VK_END: case VK_DELETE: case VK_PRIOR: case VK_NEXT:
-        case VK_SNAPSHOT: case VK_PRINT: case VK_SELECT: case VK_HELP: case VK_EXECUTE: case VK_NUMLOCK: case VK_SCROLL:
             return KEY_ESC;
         default: return KEY_EMPTY;
     }

@@ -14,6 +14,8 @@ static bool isWordStart(Uint16 key, bool shift) { return isWhitespace(key) || (k
 static char16_t charOf(Uint32 d) { return (d & CHAR_CODE_MASK) ? (char16_t)(d & 0xFFFF) : (char16_t)keyCodeToCharacter(d); }
 static char16_t typedChar(Uint16 key, bool shift) {
     if (key == KEY_RETURN || key == KEY_ENTER) return u'\n';
+    if (key == KEY_SPACE) return u' ';
+    if (key == KEY_TAB) return u'\t';
     return keyCodeToCharacter(key | (shift ? CAPS_MASK : 0));
 }
 

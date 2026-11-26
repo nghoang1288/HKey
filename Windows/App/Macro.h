@@ -12,10 +12,11 @@ void init();
 
 // Reload macro table from disk (called automatically if file timestamp changes)
 void reload();
+void reloadIfModified();
 
 // Check if macro expansion is enabled
 bool isEnabled();
-void setEnabled(bool enabled);
+void setEnabled(bool enabled, bool persist = true);
 
 // Get the resolved path to macro.txt
 std::wstring macroFilePath();

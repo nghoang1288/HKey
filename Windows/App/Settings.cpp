@@ -2,7 +2,7 @@
 #ifdef VIKEY_VERSION
 #define HKEY_VERSION VIKEY_VERSION
 #else
-#define HKEY_VERSION "1.0.28"
+#define HKEY_VERSION "1.2.1"
 #endif
 #endif
 #ifndef HKEY_VERSION_W
@@ -36,11 +36,14 @@
 namespace Gdiplus { using std::min; using std::max; }
 #include <gdiplus.h>
 #include <algorithm>
+#include <deque>
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_map>
 #include <fstream>
 #include <functional>
+#include <tlhelp32.h>
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "d2d1.lib")
@@ -76,7 +79,10 @@ static void roundRect(Graphics& g, RectF r, float radius, Color fill, Color stro
 }
 static std::wstring hotkeyDisplay(int hk) {
     std::wstring s;
-    if (HAS_CONTROL(hk)) s += L"Ctrl+"; if (HAS_OPTION(hk)) s += L"Alt+"; if (HAS_SHIFT(hk)) s += L"Shift+"; if (HAS_COMMAND(hk)) s += L"Win+";
+    if (HAS_CONTROL(hk)) s += L"Ctrl+";
+    if (HAS_OPTION(hk)) s += L"Alt+";
+    if (HAS_SHIFT(hk)) s += L"Shift+";
+    if (HAS_COMMAND(hk)) s += L"Win+";
     int k = GET_SWITCH_KEY(hk);
     if (k != 0xFE) {
         Uint16 ch = keyCodeToCharacter(k | CAPS_MASK);
@@ -104,6 +110,7 @@ static void colorText(HDC dc, const std::wstring& s, RECT r, float px, COLORREF 
     if (!rt || !dw) { DrawTextW(dc, s.c_str(), -1, &r, DT_WORDBREAK | DT_NOPREFIX); return; }
     IDWriteTextFormat* f = nullptr; dw->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px, L"vi", &f);
     if (!f) return;
+    rt->SetDpi(96.0f, 96.0f);
     rt->BindDC(dc, &r); rt->BeginDraw(); rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_CLEARTYPE);
     ID2D1SolidColorBrush* b = nullptr; rt->CreateSolidColorBrush(D2D1::ColorF(GetRValue(c) / 255.0f, GetGValue(c) / 255.0f, GetBValue(c) / 255.0f), &b);
     if (b) { rt->DrawTextW(s.c_str(), (UINT32)s.size(), f, D2D1::RectF(0, 0, (float)(r.right - r.left), (float)(r.bottom - r.top)), b, D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT); b->Release(); }
@@ -115,7 +122,8 @@ static void centerOnMouseScreen(HWND h) {
     POINT p; GetCursorPos(&p); MONITORINFO mi = {sizeof(mi)}; GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &mi);
     RECT r; GetWindowRect(h, &r); int w = r.right - r.left, hh = r.bottom - r.top; RECT a = mi.rcWork;
     int x = (a.left + a.right - w) / 2, y = (a.top + a.bottom - hh) / 2;
-    if (y < a.top) y = a.top; if (x < a.left) x = a.left;
+    if (y < a.top) y = a.top;
+    if (x < a.left) x = a.left;
     SetWindowPos(h, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 static void bringToFront(HWND h) { ShowWindow(h, SW_SHOW); SetForegroundWindow(h); }
@@ -238,7 +246,8 @@ static void commitRecorder(HWND h, int value) {
         if ((value & ~0x8000) == (currentHotkey() & ~0x8000)) return;
         r->value = value & ~0x8000;
     } else r->value = value | (currentHotkey() & 0x8000);
-    r->recording = false; prefs::setInt(r->pref, r->value); core::reloadSettings(); InvalidateRect(h, nullptr, FALSE);
+    r->recording = false; core::setRecordingHotkey(false);
+    prefs::setInt(r->pref, r->value); core::reloadSettings(); InvalidateRect(h, nullptr, FALSE);
     SendMessageW(GetParent(h), WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(h), BN_CLICKED), (LPARAM)h);
     afterHotkeyChange();
 }
@@ -257,24 +266,23 @@ static LRESULT CALLBACK hotkeyProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         std::wstring t = recording ? L"Bấm phím tắt…" : (r && r->value == 0) ? L"Chưa đặt" : hotkeyDisplay(r ? r->value : 0);
         DrawTextW(mem, t.c_str(), -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY); SelectObject(mem, old); DeleteObject(bmp); DeleteDC(mem); EndPaint(h, &ps); return 0; }
-    case WM_LBUTTONUP: if (r) { if (r->recording) { r->recording = false; } else { SetFocus(h); r->recording = true; } InvalidateRect(h, nullptr, FALSE); } return 0;
-    case WM_KILLFOCUS: if (r) r->recording = false; InvalidateRect(h, nullptr, FALSE); return 0;
+    case WM_LBUTTONUP: if (r) { if (r->recording) { r->recording = false; core::setRecordingHotkey(false); } else { SetFocus(h); r->recording = true; core::setRecordingHotkey(true); } InvalidateRect(h, nullptr, FALSE); } return 0;
+    case WM_KILLFOCUS: if (r) { r->recording = false; core::setRecordingHotkey(false); } InvalidateRect(h, nullptr, FALSE); return 0;
     case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
     case WM_CHAR: case WM_SYSCHAR: return 0;
     case WM_KEYDOWN: case WM_SYSKEYDOWN: {
         if (!r || !r->recording) return 0;
         DWORD vk = (DWORD)w;
         bool ctrl = GetKeyState(VK_CONTROL) < 0, alt = GetKeyState(VK_MENU) < 0, shift = GetKeyState(VK_SHIFT) < 0, win = GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0;
-        if (vk == VK_ESCAPE && !ctrl && !alt && !win && !shift) { r->recording = false; InvalidateRect(h, nullptr, FALSE); return 0; }   // Esc cancels
-        if (isModVk(vk)) return 0;   // modifiers alone: committed on key-up
+        if (vk == VK_ESCAPE && !ctrl && !alt && !win && !shift) { r->recording = false; core::setRecordingHotkey(false); InvalidateRect(h, nullptr, FALSE); return 0; }
+        if (isModVk(vk)) return 0;
         int key = (int)engineKey(vk); if (key == KEY_EMPTY) return 0;
-        if (!(ctrl || alt || win || shift)) return 0;   // a key alone is not a shortcut
+        if (!(ctrl || alt || win)) return 0;   // require Ctrl, Alt, or Win (never Shift+letter alone)
         commitRecorder(h, key | (ctrl ? 0x100 : 0) | (alt ? 0x200 : 0) | (win ? 0x400 : 0) | (shift ? 0x800 : 0));
         return 0; }
     case WM_KEYUP: case WM_SYSKEYUP: {
         if (!r || !r->recording || !r->modsOnly) return 0;
         DWORD vk = (DWORD)w; if (!isModVk(vk)) return 0;
-        // modifiers only: the combination that was held when the first one is released, at least two of them
         int mods = (vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_CONTROL || GetKeyState(VK_CONTROL) < 0 ? 0x100 : 0) | (vk == VK_LMENU || vk == VK_RMENU || vk == VK_MENU || GetKeyState(VK_MENU) < 0 ? 0x200 : 0) |
                    (vk == VK_LWIN || vk == VK_RWIN || GetKeyState(VK_LWIN) < 0 || GetKeyState(VK_RWIN) < 0 ? 0x400 : 0) | (vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_SHIFT || GetKeyState(VK_SHIFT) < 0 ? 0x800 : 0);
         int n = !!(mods & 0x100) + !!(mods & 0x200) + !!(mods & 0x400) + !!(mods & 0x800);
@@ -282,7 +290,7 @@ static LRESULT CALLBACK hotkeyProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         commitRecorder(h, 0xFE | mods); return 0; }
     case WM_ERASEBKGND: return 1;
     case WM_SETCURSOR: SetCursor(LoadCursor(nullptr, IDC_HAND)); return TRUE;
-    case WM_NCDESTROY: delete r; SetWindowLongPtrW(h, GWLP_USERDATA, 0); RemovePropW(h, L"vkbg"); break;
+    case WM_NCDESTROY: if (r && r->recording) core::setRecordingHotkey(false); delete r; SetWindowLongPtrW(h, GWLP_USERDATA, 0); RemovePropW(h, L"vkbg"); break;
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -309,14 +317,15 @@ static void registerClasses(HINSTANCE inst) {
 }
 static HWND makeChild(HWND parent, const wchar_t* cls, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id, HFONT f = nullptr) {
     HWND c = CreateWindowW(cls, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, parent, (HMENU)(INT_PTR)id, nullptr, nullptr);
-    if (f) SendMessageW(c, WM_SETFONT, (WPARAM)f, TRUE); return c;
+    if (f) SendMessageW(c, WM_SETFONT, (WPARAM)f, TRUE);
+    return c;
 }
 static HWND makeRecorder(HWND parent, const wchar_t* pref, bool modsOnly, int value, int x, int y, int w, int h, int id, COLORREF bg) {
     HWND c = makeChild(parent, L"VikeyHotkey", L"", WS_TABSTOP, x, y, w, h, id); setBg(c, bg);
     SetWindowLongPtrW(c, GWLP_USERDATA, (LONG_PTR)new Recorder{pref, modsOnly, false, value});
     return c;
 }
-static void startRecording(HWND c) { if (Recorder* r = rec(c)) { SetFocus(c); r->recording = true; InvalidateRect(c, nullptr, FALSE); } }
+static void startRecording(HWND c) { if (Recorder* r = rec(c)) { SetFocus(c); r->recording = true; core::setRecordingHotkey(true); InvalidateRect(c, nullptr, FALSE); } }
 static void destroyChildren(HWND h) { std::vector<HWND> kids; for (HWND c = GetWindow(h, GW_CHILD); c; c = GetWindow(c, GW_HWNDNEXT)) kids.push_back(c); for (HWND c : kids) DestroyWindow(c); }
 
 // ---- main window -----------------------------------------------------------------------------
@@ -539,7 +548,8 @@ static std::wstring normalize(const std::wstring& s) {
     if (t.empty()) return t;
     int n = NormalizeString(NormalizationC, t.c_str(), (int)t.size(), nullptr, 0); std::wstring c(n > 0 ? n : 0, 0);
     if (n > 0) { n = NormalizeString(NormalizationC, t.c_str(), (int)t.size(), &c[0], n); c.resize(n > 0 ? n : 0); } else c = t;
-    if (!c.empty()) CharLowerBuffW(&c[0], (DWORD)c.size()); return c;
+    if (!c.empty()) CharLowerBuffW(&c[0], (DWORD)c.size());
+    return c;
 }
 static std::wstring practiceText() {
     return core::language() == 1 ? L"Gõ đúng các phím bên dưới, kể cả tiếng Anh. HKey bỏ dấu cho tiếng Việt và để nguyên tiếng Anh."
@@ -761,8 +771,8 @@ static int _ackScroll = 0, _ackContent = 0; static std::vector<Link> _ackLinks;
 static int paintAck(HDC dc, int top, bool draw) {   // returns the content height
     int y = top + AP; _ackLinks.clear();
     struct Sec { const wchar_t* title; const wchar_t* note; const Credit* items; int n; } secs[] = {
-        {L"Mã nguồn", L"Vikey dùng mã nguồn của:", ACK_CODE, (int)(sizeof(ACK_CODE) / sizeof(*ACK_CODE))},
-        {L"Dữ liệu từ ngữ", L"Vikey tự chuyển Anh/Việt nhờ thống kê từ ngữ đếm từ các nguồn này. Trong ứng dụng chỉ có số liệu thống kê, không có văn bản nào.", ACK_WORDS, (int)(sizeof(ACK_WORDS) / sizeof(*ACK_WORDS))},
+        {L"Mã nguồn", L"HKey dùng mã nguồn của:", ACK_CODE, (int)(sizeof(ACK_CODE) / sizeof(*ACK_CODE))},
+        {L"Dữ liệu từ ngữ", L"HKey tự chuyển Anh/Việt nhờ thống kê từ ngữ đếm từ các nguồn này. Trong ứng dụng chỉ có số liệu thống kê, không có văn bản nào.", ACK_WORDS, (int)(sizeof(ACK_WORDS) / sizeof(*ACK_WORDS))},
         {L"Dữ liệu kiểm thử", L"Chỉ dùng để đo và cải thiện độ chính xác, không có trong ứng dụng.", ACK_TEST, (int)(sizeof(ACK_TEST) / sizeof(*ACK_TEST))}};
     SetBkMode(dc, TRANSPARENT);
     for (int si = 0; si < 3; si++) {
@@ -802,7 +812,14 @@ static LRESULT CALLBACK ackProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (msg == WM_MOUSEWHEEL) s -= GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA * 60;
         else switch (LOWORD(wp)) { case SB_LINEUP: s -= 30; break; case SB_LINEDOWN: s += 30; break; case SB_PAGEUP: s -= rc.bottom; break; case SB_PAGEDOWN: s += rc.bottom; break; case SB_THUMBTRACK: case SB_THUMBPOSITION: s = HIWORD(wp); break; case SB_TOP: s = 0; break; case SB_BOTTOM: s = maxS; break; }
         _ackScroll = std::max(0, std::min(s, maxS)); SetScrollPos(h, SB_VERT, _ackScroll, TRUE); InvalidateRect(h, nullptr, FALSE); return 0; }
-    case WM_SETCURSOR: { POINT p; GetCursorPos(&p); ScreenToClient(h, &p); if (LOWORD(lp) == HTCLIENT) { SetCursor(LoadCursor(nullptr, linkAt(_ackLinks, MAKELPARAM(p.x, p.y)) ? IDC_HAND : IDC_ARROW)); return TRUE; } break; }
+    case WM_SETCURSOR: {
+        POINT p; GetCursorPos(&p); ScreenToClient(h, &p);
+        if (LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursor(nullptr, linkAt(_ackLinks, MAKELPARAM(p.x, p.y)) ? IDC_HAND : IDC_ARROW));
+            return TRUE;
+        }
+        break;
+    }
     case WM_LBUTTONUP: if (const Link* l = linkAt(_ackLinks, lp)) ShellExecuteW(nullptr, L"open", l->url.c_str(), nullptr, nullptr, SW_SHOW); return 0;
     case WM_CLOSE: DestroyWindow(h); return 0;
     case WM_DESTROY: _ackWin = nullptr; return 0;
@@ -896,7 +913,22 @@ static LRESULT CALLBACK blacklistProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         int id = LOWORD(wp);
         switch (id) {
         case BL_ADD_RUNNING: {
-            std::vector<std::wstring> runningApps;
+            struct RunningScanCtx {
+                std::vector<std::wstring> apps;
+                std::unordered_map<DWORD, std::wstring> pidNames;
+            } scanCtx;
+            HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if (snap != INVALID_HANDLE_VALUE) {
+                PROCESSENTRY32W pe = {sizeof(pe)};
+                if (Process32FirstW(snap, &pe)) {
+                    do {
+                        std::wstring pn = pe.szExeFile;
+                        for (auto& ch : pn) ch = towlower(ch);
+                        if (!pn.empty()) scanCtx.pidNames[pe.th32ProcessID] = std::move(pn);
+                    } while (Process32NextW(snap, &pe));
+                }
+                CloseHandle(snap);
+            }
             EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
                 if (!IsWindowVisible(hwnd)) return TRUE;
                 int len = GetWindowTextLengthW(hwnd);
@@ -904,6 +936,8 @@ static LRESULT CALLBACK blacklistProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 DWORD pid = 0;
                 GetWindowThreadProcessId(hwnd, &pid);
                 if (pid == GetCurrentProcessId()) return TRUE;
+                auto* ctx = (RunningScanCtx*)lParam;
+                std::wstring name;
                 HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
                 if (hProcess) {
                     wchar_t path[MAX_PATH] = {0};
@@ -911,22 +945,26 @@ static LRESULT CALLBACK blacklistProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                     if (QueryFullProcessImageNameW(hProcess, 0, path, &size)) {
                         std::wstring s(path);
                         size_t i = s.find_last_of(L"\\/");
-                        std::wstring name = i == std::wstring::npos ? s : s.substr(i + 1);
+                        name = i == std::wstring::npos ? s : s.substr(i + 1);
                         for (auto& c : name) c = towlower(c);
-                        if (name != L"explorer.exe" && name != L"applicationframehost.exe" &&
-                            name != L"shellexperiencehost.exe" && name != L"searchhost.exe" &&
-                            name != L"systemsettings.exe" && name != L"textinputhost.exe") {
-                            auto* apps = (std::vector<std::wstring>*)lParam;
-                            if (std::find(apps->begin(), apps->end(), name) == apps->end()) {
-                                apps->push_back(name);
-                            }
-                        }
                     }
                     CloseHandle(hProcess);
                 }
+                if (name.empty()) {
+                    auto it = ctx->pidNames.find(pid);
+                    if (it != ctx->pidNames.end()) name = it->second;
+                }
+                if (!name.empty() && name != L"explorer.exe" && name != L"applicationframehost.exe" &&
+                    name != L"shellexperiencehost.exe" && name != L"searchhost.exe" &&
+                    name != L"systemsettings.exe" && name != L"textinputhost.exe") {
+                    if (std::find(ctx->apps.begin(), ctx->apps.end(), name) == ctx->apps.end()) {
+                        ctx->apps.push_back(name);
+                    }
+                }
                 return TRUE;
-            }, (LPARAM)&runningApps);
+            }, (LPARAM)&scanCtx);
 
+            std::vector<std::wstring>& runningApps = scanCtx.apps;
             std::sort(runningApps.begin(), runningApps.end());
             if (runningApps.empty()) {
                 MessageBoxW(h, L"Không tìm thấy ứng dụng nào đang chạy.", L"Thông báo", MB_OK | MB_ICONINFORMATION);
@@ -1095,7 +1133,12 @@ static Period sumStats(int days) {   // TLStat_<day>_<name> registry values
     for (DWORD i = 0;; i++) { wchar_t name[256]; DWORD nl = 256, type, v, vs = sizeof(v); LONG rc = RegEnumValueW(h, i, name, &nl, nullptr, &type, (LPBYTE)&v, &vs);
         if (rc == ERROR_MORE_DATA) continue;   // a longer value (the smart-switch table): not a counter
         if (rc != ERROR_SUCCESS) break;
-        std::wstring n = name; if (n.rfind(L"TLStat_", 0) != 0 || type != REG_DWORD) continue; std::wstring day = n.substr(7, 10); if (day < from) continue; p.c[n.substr(18)] += (int)v; }
+        std::wstring n = name;
+        if (n.rfind(L"TLStat_", 0) != 0 || type != REG_DWORD || n.size() < 19) continue;
+        std::wstring day = n.substr(7, 10);
+        if (day < from) continue;
+        p.c[n.substr(18)] += (int)v;
+    }
     RegCloseKey(h); return p;
 }
 static void refreshLog() {
@@ -1118,9 +1161,27 @@ static void refreshLog() {
             ListView_SetItemText(_logGrid, r, c + 1, (LPWSTR)v.c_str());
         }
     }
-    // events, newest first
-    std::ifstream f(core::typingLogPath().c_str(), std::ios::binary); std::vector<std::string> lines; std::string l;
-    while (std::getline(f, l)) { if (!l.empty()) lines.push_back(l); if (lines.size() > 2000) lines.erase(lines.begin(), lines.begin() + 1000); }
+    // events, newest first (read only tail of file so 20MB logs open instantly)
+    std::deque<std::string> lines;
+    std::ifstream f(core::typingLogPath().c_str(), std::ios::binary | std::ios::ate);
+    if (f) {
+        std::streamoff fsize = f.tellg();
+        const std::streamoff tailBytes = 512 * 1024;
+        if (fsize > tailBytes) {
+            f.seekg(fsize - tailBytes);
+            std::string discard;
+            std::getline(f, discard);
+        } else {
+            f.seekg(0);
+        }
+        std::string l;
+        while (std::getline(f, l)) {
+            if (!l.empty()) {
+                if (lines.size() >= 300) lines.pop_front();
+                lines.push_back(std::move(l));
+            }
+        }
+    }
     ListView_DeleteAllItems(_logList);
     int n = 0;
     for (auto li = lines.rbegin(); li != lines.rend() && n < 300; ++li, ++n) {
@@ -1152,7 +1213,19 @@ static LRESULT CALLBACK logProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) { cd->clrText = cd->nmcd.lItemlParam == 1 ? RGB(255, 149, 0) : (cd->nmcd.lItemlParam == 2 ? ACCENT : TEXT); return CDRF_NEWFONT; } }
         return 0; }
     case WM_CTLCOLORSTATIC: SetBkMode((HDC)wp, TRANSPARENT); SetTextColor((HDC)wp, (HWND)lp == _logSummary ? TEXT : SECONDARY); return (LRESULT)GetStockObject(WHITE_BRUSH);
-    case WM_SIZE: { RECT r; GetClientRect(h, &r); MoveWindow(_logList, 20, 390, r.right - 40, r.bottom - 390 - 56, TRUE); for (int id : {L_REFRESH, L_OPEN, L_CLEAR}) { HWND b = GetDlgItem(h, id); RECT br; GetWindowRect(b, &br); MapWindowPoints(nullptr, h, (POINT*)&br, 2); MoveWindow(b, id == L_CLEAR ? r.right - 20 - 100 : br.left, r.bottom - 44, id == L_CLEAR ? 100 : br.right - br.left, 28, TRUE); } return 0; }
+    case WM_SIZE: {
+        RECT r; GetClientRect(h, &r);
+        LONG listW = std::max(100L, r.right - 40);
+        LONG listH = std::max(60L, r.bottom - 390 - 56);
+        LONG btnY = std::max(460L, r.bottom - 44);
+        MoveWindow(_logList, 20, 390, listW, listH, TRUE);
+        for (int id : {L_REFRESH, L_OPEN, L_CLEAR}) {
+            HWND b = GetDlgItem(h, id);
+            RECT br; GetWindowRect(b, &br); MapWindowPoints(nullptr, h, (POINT*)&br, 2);
+            MoveWindow(b, id == L_CLEAR ? std::max(230L, r.right - 20 - 100) : br.left, btnY, id == L_CLEAR ? 100 : br.right - br.left, 28, TRUE);
+        }
+        return 0;
+    }
     case WM_CLOSE: DestroyWindow(h); return 0;
     case WM_DESTROY: _logWin = nullptr; return 0;
     }

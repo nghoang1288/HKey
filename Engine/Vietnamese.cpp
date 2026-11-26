@@ -7,14 +7,10 @@
 //
 
 #include "Vietnamese.h"
-#include "iostream"
+#include <iostream>
 using namespace std;
 
 //unicode
-Uint16 douKey[][2] = {
-    {KEY_A, 0xE2}, //a -> â
-    {KEY_E, 0xEA}  //e -> ê
-};
 
 map<Uint16, vector<vector<Uint16>>> _vowel = {
     {
@@ -476,11 +472,22 @@ void initKeyCodeToChar() {
 }
 
 Uint16 keyCodeToCharacter(const Uint32& keyCode) {
-    if (_keyCodeToChar.size() == 0) { //init data if it is empty
-        initKeyCodeToChar();
-    }
-    if (_keyCodeToChar.find(keyCode) != _keyCodeToChar.end()) {
-        return _keyCodeToChar[keyCode];
-    }
-    return 0;
+    static const Uint16 kLut[64][2] = {
+        /* 0: KEY_A */ {'a', 'A'}, /* 1: KEY_S */ {'s', 'S'}, /* 2: KEY_D */ {'d', 'D'}, /* 3: KEY_F */ {'f', 'F'},
+        /* 4: KEY_H */ {'h', 'H'}, /* 5: KEY_G */ {'g', 'G'}, /* 6: KEY_Z */ {'z', 'Z'}, /* 7: KEY_X */ {'x', 'X'},
+        /* 8: KEY_C */ {'c', 'C'}, /* 9: KEY_V */ {'v', 'V'}, /* 10 */ {0, 0}, /* 11: KEY_B */ {'b', 'B'},
+        /* 12: KEY_Q */ {'q', 'Q'}, /* 13: KEY_W */ {'w', 'W'}, /* 14: KEY_E */ {'e', 'E'}, /* 15: KEY_R */ {'r', 'R'},
+        /* 16: KEY_Y */ {'y', 'Y'}, /* 17: KEY_T */ {'t', 'T'}, /* 18: KEY_1 */ {'1', '!'}, /* 19: KEY_2 */ {'2', '@'},
+        /* 20: KEY_3 */ {'3', '#'}, /* 21: KEY_4 */ {'4', '$'}, /* 22: KEY_6 */ {'6', '^'}, /* 23: KEY_5 */ {'5', '%'},
+        /* 24: KEY_EQUALS */ {'=', '+'}, /* 25: KEY_9 */ {'9', '('}, /* 26: KEY_7 */ {'7', '&'}, /* 27: KEY_MINUS */ {'-', '_'},
+        /* 28: KEY_8 */ {'8', '*'}, /* 29: KEY_0 */ {'0', ')'}, /* 30: KEY_RIGHT_BRACKET */ {']', '}'}, /* 31: KEY_O */ {'o', 'O'},
+        /* 32: KEY_U */ {'u', 'U'}, /* 33: KEY_LEFT_BRACKET */ {'[', '{'}, /* 34: KEY_I */ {'i', 'I'}, /* 35: KEY_P */ {'p', 'P'},
+        /* 36 */ {0, 0}, /* 37: KEY_L */ {'l', 'L'}, /* 38: KEY_J */ {'j', 'J'}, /* 39: KEY_QUOTE */ {'\'', '"'},
+        /* 40: KEY_K */ {'k', 'K'}, /* 41: KEY_SEMICOLON */ {';', ':'}, /* 42: KEY_BACK_SLASH */ {'\\', '|'}, /* 43: KEY_COMMA */ {',', '<'},
+        /* 44: KEY_SLASH */ {'/', '?'}, /* 45: KEY_N */ {'n', 'N'}, /* 46: KEY_M */ {'m', 'M'}, /* 47: KEY_DOT */ {'.', '>'},
+        /* 48 */ {0, 0}, /* 49: KEY_SPACE */ {' ', 0}, /* 50: KEY_BACKQUOTE */ {'`', '~'},
+    };
+    Uint32 base = keyCode & CHAR_MASK;
+    if (base >= 64 || (keyCode & ~(CHAR_MASK | CAPS_MASK)) != 0) return 0;
+    return kLut[base][(keyCode & CAPS_MASK) ? 1 : 0];
 }

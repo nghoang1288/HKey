@@ -26,7 +26,7 @@ struct AutoCapitalizeHelper {
 
     static bool isAbbreviation(const std::wstring& word) {
         static const wchar_t* abbrevs[] = {
-            L"tp", L"th.s", L"dr", L"mr", L"mrs", L"ms",
+            L"tp", L"ths", L"dr", L"mr", L"mrs", L"ms",
             L"ts", L"bs", L"ks", L"gs", L"tt", L"etc", L"vv", L"eg", L"ie"
         };
         std::wstring lower = word;
@@ -128,7 +128,8 @@ struct AutoCapitalizeHelper {
 
         // Numbers & others
         if (IS_NUMBER_KEY(key) && !shift) {
-            lastChar = (wchar_t)(L'0' + (key - KEY_0));
+            Uint16 ch = keyCodeToCharacter(key);
+            lastChar = ch ? (wchar_t)ch : 0;
         } else {
             lastChar = 0;
         }

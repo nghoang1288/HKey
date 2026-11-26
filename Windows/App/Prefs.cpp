@@ -56,9 +56,22 @@ void setBinary(const wchar_t* key, const BYTE* data, DWORD size) {
 
 std::wstring getString(const wchar_t* key, const std::wstring& fallback) {
     HKEY h = open(KEY_READ); if (!h) return fallback;
-    wchar_t buf[1024]; DWORD size = sizeof(buf), type = 0;
+    DWORD size = 0, type = 0;
     std::wstring r = fallback;
-    if (RegQueryValueExW(h, key, nullptr, &type, (LPBYTE)buf, &size) == ERROR_SUCCESS && type == REG_SZ) r.assign(buf, size / 2 ? size / 2 - 1 : 0);
+    if (RegQueryValueExW(h, key, nullptr, &type, nullptr, &size) == ERROR_SUCCESS &&
+        (type == REG_SZ || type == REG_EXPAND_SZ)) {
+        if (size < sizeof(wchar_t)) {
+            r.clear();
+        } else {
+            std::wstring buf(size / sizeof(wchar_t), L'\0');
+            if (RegQueryValueExW(h, key, nullptr, &type, (LPBYTE)&buf[0], &size) == ERROR_SUCCESS) {
+                size_t len = size / sizeof(wchar_t);
+                if (len > buf.size()) len = buf.size();
+                while (len > 0 && buf[len - 1] == L'\0') len--;
+                r.assign(buf.data(), len);
+            }
+        }
+    }
     RegCloseKey(h); return r;
 }
 
@@ -207,14 +220,29 @@ void migrateFromOpenKey() {
     // Try migrating from Vikey first
     HKEY hVikey = nullptr;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Vikey", 0, KEY_READ, &hVikey) == ERROR_SUCCESS) {
+        std::vector<BYTE> data(4096);
         for (DWORD i = 0;; i++) {
             wchar_t valName[256]; DWORD valLen = 256, type = 0;
-            BYTE data[4096]; DWORD dataLen = sizeof(data);
-            if (RegEnumValueW(hVikey, i, valName, &valLen, nullptr, &type, data, &dataLen) != ERROR_SUCCESS) break;
+            DWORD dataLen = (DWORD)data.size();
+            LONG rc = RegEnumValueW(hVikey, i, valName, &valLen, nullptr, &type, data.data(), &dataLen);
+            if (rc == ERROR_MORE_DATA && dataLen > data.size() && dataLen <= (4u << 20)) {
+                data.resize(dataLen);
+                valLen = 256;
+                rc = RegEnumValueW(hVikey, i, valName, &valLen, nullptr, &type, data.data(), &dataLen);
+            }
+            if (rc == ERROR_NO_MORE_ITEMS) break;
+            if (rc != ERROR_SUCCESS) continue;
             if (!has(valName)) {
-                if (type == REG_DWORD && dataLen == sizeof(DWORD)) setInt(valName, *(int*)data);
-                else if (type == REG_SZ) setString(valName, (wchar_t*)data);
-                else if (type == REG_BINARY) setBinary(valName, data, dataLen);
+                if (type == REG_DWORD && dataLen == sizeof(DWORD)) {
+                    DWORD v = 0; memcpy(&v, data.data(), sizeof(v)); setInt(valName, (int)v);
+                } else if (type == REG_SZ && dataLen >= sizeof(wchar_t)) {
+                    size_t wlen = dataLen / sizeof(wchar_t);
+                    const wchar_t* wp = (const wchar_t*)data.data();
+                    while (wlen > 0 && wp[wlen - 1] == L'\0') wlen--;
+                    setString(valName, std::wstring(wp, wlen));
+                } else if (type == REG_BINARY) {
+                    setBinary(valName, data.data(), dataLen);
+                }
             }
         }
         RegCloseKey(hVikey);

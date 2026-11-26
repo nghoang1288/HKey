@@ -1,4 +1,4 @@
-// HKey for Windows: tray icon (V / E), menu, and the message loop the hooks need.
+// HKey for Windows: tray icon (V / E), menu, and the UI message loop.
 #include <windows.h>
 #include <shellapi.h>
 #include <string>
@@ -19,19 +19,23 @@
 #pragma comment(lib, "advapi32.lib")
 
 static const UINT WM_TRAY = WM_APP + 1;
-static const UINT WM_HKEY_SETLANG = WM_APP + 2;   // tests: wParam = language (0 English, 1 Vietnamese)
-static const UINT WM_HKEY_EMOJI = WM_APP + 5;     // the emoji hotkey, posted from the keyboard hook
+static const UINT WM_HKEY_SETLANG = WM_APP + 2;      // tests: wParam = language (0 English, 1 Vietnamese)
+static const UINT WM_HKEY_EMOJI = WM_APP + 5;        // the emoji hotkey, dispatched to UI thread
 static const UINT WM_HKEY_SITE_CHANGED = WM_APP + 6;
+static const UINT WM_HKEY_ASYNC = WM_APP + 7;        // async tray/prefs/log flush from hook thread
 static const UINT TIMER_FLUSH = 1, TIMER_SITE = 2;
 enum { ID_VIET = 100, ID_ENG, ID_SETTINGS, ID_AUTOSWITCH, ID_MACROTOGGLE, ID_UPDATE, ID_LOGTOGGLE, ID_LOG, ID_ABOUT, ID_QUIT, ID_GUIDE, ID_FEEDBACK };
 
 static HWND _hwnd; static NOTIFYICONDATAW _nid = {};
 static HICON _iconV, _iconE;
 static bool _justDblClick = false;
+static UINT _wmTaskbarCreated = 0;
 
-/// Draws the menu-bar glyph: a rounded square with a V or E cut out
+/// Draws the tray glyph: a rounded square with a V or E cut out, sized to SM_CXSMICON.
 static HICON makeIcon(wchar_t letter, bool dark) {
-    const int S = 32;
+    int S = GetSystemMetrics(SM_CXSMICON);
+    if (S < 16) S = 16;
+    if (S < 32) S = 32; // keep crisp alpha mask downscaling for 16px/24px/32px trays
     HDC dc = CreateCompatibleDC(nullptr);
     BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = S; bi.bmiHeader.biHeight = -S; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32;
     void* bits = nullptr; HBITMAP color = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
@@ -39,13 +43,14 @@ static HICON makeIcon(wchar_t letter, bool dark) {
     DWORD* px = (DWORD*)bits; for (int i = 0; i < S * S; i++) px[i] = 0;
     COLORREF fg = dark ? RGB(255, 255, 255) : RGB(0, 0, 0);
     HBRUSH b = CreateSolidBrush(fg); HPEN p = CreatePen(PS_NULL, 0, 0);
-    SelectObject(dc, b); SelectObject(dc, p);
+    HGDIOBJ oldB = SelectObject(dc, b); HGDIOBJ oldP = SelectObject(dc, p);
     RoundRect(dc, 2, 3, S - 2, S - 3, 10, 10);
-    HFONT f = CreateFontW(-22, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    SelectObject(dc, f); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(1, 2, 3));
+    HFONT f = CreateFontW(-(S * 22 / 32), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    HGDIOBJ oldF = SelectObject(dc, f); SetBkMode(dc, TRANSPARENT); SetTextColor(dc, RGB(1, 2, 3));
     RECT r = {0, 1, S, S}; DrawTextW(dc, &letter, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     for (int i = 0; i < S * S; i++) { DWORD c = px[i] & 0xFFFFFF; if (c == 0x030201) px[i] = 0; else if (c != 0) px[i] |= 0xFF000000; else px[i] = 0; }
-    SelectObject(dc, old); DeleteObject(f); DeleteObject(b); DeleteObject(p); DeleteDC(dc);
+    SelectObject(dc, oldF); SelectObject(dc, oldB); SelectObject(dc, oldP); SelectObject(dc, old);
+    DeleteObject(f); DeleteObject(b); DeleteObject(p); DeleteDC(dc);
     HBITMAP mask = CreateBitmap(S, S, 1, 1, nullptr);
     ICONINFO ii = {TRUE, 0, 0, mask, color}; HICON h = CreateIconIndirect(&ii);
     DeleteObject(mask); DeleteObject(color); return h;
@@ -97,6 +102,11 @@ static void showMenu() {
 
 static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     using namespace hkey;
+    if (_wmTaskbarCreated && msg == _wmTaskbarCreated) {
+        _nid.hIcon = core::language() ? _iconV : _iconE;
+        Shell_NotifyIconW(NIM_ADD, &_nid);
+        return 0;
+    }
     switch (msg) {
     case WM_TRAY:
         if (LOWORD(lp) == WM_LBUTTONUP) {
@@ -139,9 +149,41 @@ static LRESULT CALLBACK wndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             hkey::core::onSiteChanged(L"");
         }
         return 0;
-    case WM_TIMER: if (wp == TIMER_FLUSH) core::flushTypingLog(); else if (wp == TIMER_SITE) hkey::site::poll(); return 0;
-    case WM_SETTINGCHANGE: { bool dark = darkTaskbar(); DestroyIcon(_iconV); DestroyIcon(_iconE); _iconV = makeIcon(L'V', dark); _iconE = makeIcon(L'E', dark); updateTray(core::language()); return 0; }
-    case WM_DESTROY: core::stop(); Shell_NotifyIconW(NIM_DELETE, &_nid); PostQuitMessage(0); return 0;
+    case WM_HKEY_ASYNC:
+        core::processUiAsyncNotifications();
+        return 0;
+    case WM_TIMER:
+        if (wp == TIMER_FLUSH) core::flushTypingLog();
+        else if (wp == TIMER_SITE) {
+            macro::reloadIfModified();
+            hkey::site::poll();
+        }
+        return 0;
+    case WM_SETTINGCHANGE:
+        if (!lp || wcscmp((const wchar_t*)lp, L"ImmersiveColorSet") == 0) {
+            bool dark = darkTaskbar();
+            DestroyIcon(_iconV); DestroyIcon(_iconE);
+            _iconV = makeIcon(L'V', dark); _iconE = makeIcon(L'E', dark);
+            updateTray(core::language());
+        }
+        return 0;
+    case WM_POWERBROADCAST:
+        if (wp == PBT_APMRESUMEAUTOMATIC || wp == PBT_APMRESUMESUSPEND) {
+            core::resyncModifiers();
+            core::resetTyping();
+        }
+        return TRUE;
+    case WM_ENDSESSION:
+        if (wp) {
+            core::stop();
+            Shell_NotifyIconW(NIM_DELETE, &_nid);
+        }
+        return 0;
+    case WM_DESTROY:
+        core::stop();
+        Shell_NotifyIconW(NIM_DELETE, &_nid);
+        PostQuitMessage(0);
+        return 0;
     }
     return DefWindowProcW(h, msg, wp, lp);
 }
@@ -154,19 +196,23 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND t = FindWindowW(L"HKeyTray", nullptr);
         if (t) { DWORD pid = 0; GetWindowThreadProcessId(t, &pid); AllowSetForegroundWindow(pid); PostMessageW(t, WM_APP + 3, 0, 0); }
+        if (single) CloseHandle(single);
         return 0;
     }
 
     hkey::prefs::migrateFromOpenKey();
     if (hkey::updater::installPendingAtLaunch()) {
-        CloseHandle(single);
+        if (single) CloseHandle(single);
         return 0;
     }
+
+    _wmTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSW wc = {}; wc.lpfnWndProc = wndProc; wc.hInstance = inst; wc.lpszClassName = L"HKeyTray"; wc.style = CS_DBLCLKS;
     RegisterClassW(&wc);
     _hwnd = CreateWindowExW(0, L"HKeyTray", L"HKey", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
     hkey::site::setNotificationWindow(_hwnd, WM_HKEY_SITE_CHANGED);
+    hkey::core::setUiNotificationWindow(_hwnd, WM_HKEY_ASYNC);
 
     bool dark = darkTaskbar();
     _iconV = makeIcon(L'V', dark); _iconE = makeIcon(L'E', dark);
@@ -176,10 +222,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     wcscpy_s(_nid.szTip, L"HKey – Tiếng Việt");
     Shell_NotifyIconW(NIM_ADD, &_nid);
 
-    hkey::macro::init();
-    hkey::core::start();
     hkey::core::setLanguageObserver([](int lang) { updateTray(lang); hkey::ui::languageChanged(lang); });
     hkey::core::setEmojiHotkeyHandler([] { PostMessageW(_hwnd, WM_HKEY_EMOJI, 0, 0); });
+    hkey::core::start();
+    hkey::emoji::install(inst);
     updateTray(hkey::core::language());
     hkey::updater::start(_hwnd);
 
@@ -191,10 +237,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     }
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
-    CloseHandle(single);
+    if (single) CloseHandle(single);
     return 0;
 }

@@ -88,3 +88,11 @@ endif()
 target_include_directories(unit_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../../Engine)
 target_link_libraries(unit_test PRIVATE vikey_engine user32 advapi32 shell32 ole32)
 target_compile_definitions(unit_test PRIVATE UNICODE _UNICODE HKEY_VERSION="${HKEY_VERSION}")
+
+set(_hkey_app_warnings
+  $<$<CXX_COMPILER_ID:MSVC>:/W3>
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wno-unknown-pragmas -Wno-missing-field-initializers>
+)
+foreach(_t hkey hkey_livetest macro_test unit_test)
+  target_compile_options(${_t} PRIVATE ${_hkey_app_warnings})
+endforeach()

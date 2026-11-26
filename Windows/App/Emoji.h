@@ -3,6 +3,7 @@
 #include <windows.h>
 
 namespace vikey { namespace emoji {
+void install(HINSTANCE inst);   // sets instance and preloads emoji index in the background
 void toggle();                  // opens the picker, or closes it if open
 void languageChanged(int lang); // updates the picker's language segment if open
 void settingsChanged();         // after EmojiPicker / EmojiHotkey prefs change

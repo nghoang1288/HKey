@@ -38,7 +38,8 @@ static std::wstring lower(std::wstring s) { if (!s.empty()) CharLowerBuffW(&s[0]
 static std::vector<std::wstring> splitWords(const std::wstring& s, wchar_t sep = L' ') {
     std::vector<std::wstring> out; std::wstring cur;
     for (wchar_t c : s) { if (c == sep) { if (!cur.empty()) out.push_back(cur); cur.clear(); } else cur += c; }
-    if (!cur.empty()) out.push_back(cur); return out;
+    if (!cur.empty()) out.push_back(cur);
+    return out;
 }
 static std::wstring trim(const std::wstring& s) { size_t a = s.find_first_not_of(L' '), b = s.find_last_not_of(L' '); return a == std::wstring::npos ? L"" : s.substr(a, b - a + 1); }
 
@@ -63,23 +64,46 @@ struct JParser {
     void ws() { while (p < e && (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t')) p++; }
     static void utf16(std::wstring& o, unsigned cp) { if (cp < 0x10000) o += (wchar_t)cp; else { cp -= 0x10000; o += (wchar_t)(0xD800 + (cp >> 10)); o += (wchar_t)(0xDC00 + (cp & 0x3FF)); } }
     std::wstring str() {
-        std::string raw; p++;   // opening quote
+        std::string raw;
+        if (p < e) p++;   // opening quote
         while (p < e && *p != '"') {
-            if (*p == '\\') { p++; char c = *p++;
-                if (c == 'u') { unsigned cp = (unsigned)strtoul(std::string(p, p + 4).c_str(), nullptr, 16); p += 4;
-                    if (cp >= 0xD800 && cp <= 0xDBFF && p + 6 <= e && p[0] == '\\' && p[1] == 'u') { unsigned lo = (unsigned)strtoul(std::string(p + 2, p + 6).c_str(), nullptr, 16); p += 6; cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00); }
-                    std::wstring w; utf16(w, cp); int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr); std::string u(n, 0); WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &u[0], n, nullptr, nullptr); raw += u; }
-                else if (c == 'n') raw += '\n'; else if (c == 't') raw += '\t'; else raw += c; }
-            else raw += *p++;
+            if (*p == '\\') {
+                p++;
+                if (p >= e) break;
+                char c = *p++;
+                if (c == 'u' && p + 4 <= e) {
+                    char hexBuf[5] = {p[0], p[1], p[2], p[3], 0};
+                    unsigned cp = (unsigned)strtoul(hexBuf, nullptr, 16);
+                    p += 4;
+                    if (cp >= 0xD800 && cp <= 0xDBFF && p + 6 <= e && p[0] == '\\' && p[1] == 'u') {
+                        char loBuf[5] = {p[2], p[3], p[4], p[5], 0};
+                        unsigned lo = (unsigned)strtoul(loBuf, nullptr, 16);
+                        p += 6;
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    }
+                    std::wstring w; utf16(w, cp);
+                    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+                    if (n > 0) {
+                        std::string u(n, 0);
+                        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &u[0], n, nullptr, nullptr);
+                        raw += u;
+                    }
+                }
+                else if (c == 'n') raw += '\n'; else if (c == 't') raw += '\t'; else raw += c;
+            } else raw += *p++;
         }
-        p++;
-        int n = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), nullptr, 0); std::wstring w(n, 0); MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), &w[0], n); return w;
+        if (p < e && *p == '"') p++;
+        int n = MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), nullptr, 0);
+        if (n <= 0) return L"";
+        std::wstring w(n, 0);
+        MultiByteToWideChar(CP_UTF8, 0, raw.c_str(), (int)raw.size(), &w[0], n);
+        return w;
     }
     JV value() {
         ws(); JV v; if (p >= e) return v;
         if (*p == '"') { v.t = JV::Str; v.s = str(); }
-        else if (*p == '[') { v.t = JV::Arr; p++; ws(); while (p < e && *p != ']') { v.a.push_back(value()); ws(); if (*p == ',') p++; ws(); } p++; }
-        else if ((*p >= '0' && *p <= '9') || *p == '-') { v.t = JV::Num; char* end; v.n = strtod(p, &end); p = end; }
+        else if (*p == '[') { v.t = JV::Arr; p++; ws(); while (p < e && *p != ']') { v.a.push_back(value()); ws(); if (p < e && *p == ',') p++; ws(); } if (p < e && *p == ']') p++; }
+        else if ((*p >= '0' && *p <= '9') || *p == '-') { v.t = JV::Num; char* end; v.n = strtod(p, &end); p = (end > p) ? end : p + 1; }
         else { while (p < e && *p != ',' && *p != ']' && *p != '}') p++; }   // true/false/null: skipped
         return v;
     }
@@ -101,7 +125,9 @@ struct GlyphCheck {
         IDWriteFontFamily* fam = nullptr; if (exists) col->GetFontFamily(idx, &fam);
         IDWriteFont* font = nullptr; if (fam) fam->GetFirstMatchingFont(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, &font);
         if (font) font->CreateFontFace(&face);
-        if (font) font->Release(); if (fam) fam->Release(); if (col) col->Release();
+        if (font) font->Release();
+        if (fam) fam->Release();
+        if (col) col->Release();
     }
     ~GlyphCheck() { if (face) face->Release(); if (fmt) fmt->Release(); if (dw) dw->Release(); }
     bool drawable(const std::wstring& s) {
@@ -262,7 +288,8 @@ static std::vector<std::wstring> usageFrequent(int n) {
     std::sort(v.begin(), v.end(), [](auto& a, auto& b) { return a.second != b.second ? a.second > b.second : a.first < b.first; });
     std::vector<std::wstring> list; for (auto& kv : v) list.push_back(kv.first);
     for (auto s : STARTER) if ((int)list.size() < n && std::find(list.begin(), list.end(), s) == list.end()) list.push_back(s);
-    if ((int)list.size() > n) list.resize(n); return list;
+    if ((int)list.size() > n) list.resize(n);
+    return list;
 }
 
 // ---- model (EmojiPickerModel) --------------------------------------------------------------------
@@ -332,6 +359,7 @@ static HINSTANCE _inst; static HWND _win; static bool _open = false; static bool
 static void open();
 static void close();
 static ID2D1Factory* _d2d; static IDWriteFactory* _dw; static ID2D1HwndRenderTarget* _rt;
+static ID2D1Bitmap* _footerIconBmp = nullptr;
 static IDWriteTextFormat *_fSearch, *_fHeader, *_fFooter, *_fEmoji, *_fEmojiFooter, *_fTone, *_fWordmark, *_fBadge, *_fEmpty;
 static ID2D1SolidColorBrush *_bText, *_bSecondary, *_bTertiary, *_bBrand, *_bBrandSoft, *_bSep, *_bBadge, *_bSelect;
 static float _dpi = 96;
@@ -342,6 +370,36 @@ static IDWriteTextFormat* fmt(const wchar_t* face, float size, DWRITE_FONT_WEIGH
     IDWriteTextFormat* f = nullptr; _dw->CreateTextFormat(face, nullptr, w, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size, L"", &f);
     if (f) { f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP); if (center) { f->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER); } f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); }
     return f;
+}
+static void buildFooterIcon() {
+    if (_footerIconBmp || !_rt) return;
+    HINSTANCE hMod = _inst ? _inst : GetModuleHandleW(nullptr);
+    HICON icon = (HICON)LoadImageW(hMod, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
+    if (!icon) return;
+    ICONINFO ii = {};
+    if (GetIconInfo(icon, &ii)) {
+        BITMAP bm = {};
+        if (ii.hbmColor && GetObject(ii.hbmColor, sizeof(bm), &bm) > 0 && bm.bmWidth > 0 && bm.bmHeight > 0) {
+            std::vector<DWORD> px((size_t)bm.bmWidth * (size_t)bm.bmHeight);
+            BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = bm.bmWidth; bi.bmiHeader.biHeight = -bm.bmHeight; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+            HDC dc = GetDC(nullptr);
+            GetDIBits(dc, ii.hbmColor, 0, bm.bmHeight, px.data(), &bi, DIB_RGB_COLORS);
+            ReleaseDC(nullptr, dc);
+            for (auto& p : px) {
+                BYTE a = (BYTE)(p >> 24);
+                if (a && a < 255) {
+                    BYTE r = (BYTE)(((p >> 16) & 255) * a / 255), g = (BYTE)(((p >> 8) & 255) * a / 255), b = (BYTE)((p & 255) * a / 255);
+                    p = (a << 24) | (r << 16) | (g << 8) | b;
+                }
+            }
+            _rt->CreateBitmap(D2D1::SizeU(bm.bmWidth, bm.bmHeight), px.data(), bm.bmWidth * 4,
+                              D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)),
+                              &_footerIconBmp);
+        }
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+    }
+    DestroyIcon(icon);
 }
 static void ensureGraphics() {
     if (!_d2d) D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &_d2d);
@@ -361,15 +419,19 @@ static void ensureGraphics() {
             _rt->CreateSolidColorBrush(D2D1::ColorF(0xA0A0A5), &_bTertiary); _rt->CreateSolidColorBrush(BRAND, &_bBrand);
             _rt->CreateSolidColorBrush(D2D1::ColorF(0x4F46E5, 0.3f), &_bBrandSoft); _rt->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.1f), &_bSep);
             _rt->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.07f), &_bBadge); _rt->CreateSolidColorBrush(D2D1::ColorF(0x4F46E5, 0.22f), &_bSelect);
+            buildFooterIcon();
         }
     }
 }
 static void dropGraphics() {
+    if (_footerIconBmp) { _footerIconBmp->Release(); _footerIconBmp = nullptr; }
     for (auto** b : {&_bText, &_bSecondary, &_bTertiary, &_bBrand, &_bBrandSoft, &_bSep, &_bBadge, &_bSelect}) if (*b) { (*b)->Release(); *b = nullptr; }
     if (_rt) { _rt->Release(); _rt = nullptr; }
 }
 static float textWidth(const std::wstring& s, IDWriteTextFormat* f) {
-    if (s.empty() || !_dw) return 0; IDWriteTextLayout* l = nullptr; _dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), f, 10000, 100, &l); if (!l) return 0;
+    if (s.empty() || !_dw) return 0;
+    IDWriteTextLayout* l = nullptr; _dw->CreateTextLayout(s.c_str(), (UINT32)s.size(), f, 10000, 100, &l);
+    if (!l) return 0;
     DWRITE_TEXT_METRICS m; l->GetMetrics(&m); l->Release(); return m.widthIncludingTrailingWhitespace;
 }
 static void text(const std::wstring& s, IDWriteTextFormat* f, D2D1_RECT_F r, ID2D1Brush* b) { if (!s.empty()) _rt->DrawTextW(s.c_str(), (UINT32)s.size(), f, r, b, (D2D1_DRAW_TEXT_OPTIONS)(D2D1_DRAW_TEXT_OPTIONS_ENABLE_COLOR_FONT | D2D1_DRAW_TEXT_OPTIONS_CLIP)); }
@@ -396,7 +458,7 @@ static void paint() {
     _rt->FillRectangle(D2D1::RectF(0, SEARCH_H, WIDTH, SEARCH_H + 1), _bSep);
     // grid
     float gt = SEARCH_H + 1, gb = HEIGHT - FOOTER_H - 1;
-    _rt->PushAxisAlignedClip(D2D1::RectF(0, gt + GRID_PAD, WIDTH, gb - GRID_PAD), D2D1_ANTIALIAS_MODE_ALIASED);   // the scrolling area itself is inset (Tony)
+    _rt->PushAxisAlignedClip(D2D1::RectF(0, gt + GRID_PAD, WIDTH, gb - GRID_PAD), D2D1_ANTIALIAS_MODE_ALIASED);
     if (_searching() && _results.empty()) text(_vietnamese ? L"Không tìm thấy emoji nào" : L"No emoji found", _fEmpty, D2D1::RectF(0, gt + 100, WIDTH, gt + 140), _bSecondary);
     for (auto& r : _rows) {
         float y = gridTop() + r.y - _scrollY; if (y + r.h < gt || y > gb) continue;
@@ -419,21 +481,11 @@ static void paint() {
     static const wchar_t* HANDS[] = {L"✋", L"✋🏻", L"✋🏼", L"✋🏽", L"✋🏾", L"✋🏿"};
     text(HANDS[_tone], _fTone, tr, _bText);
     _rt->FillRectangle(D2D1::RectF(tr.left - 10, fy + 14, tr.left - 9, HEIGHT - 14), _bSep);
-    float wx = tr.left - 10 - 10; float keyW = textWidth(L"key", _fWordmark), viW = textWidth(L"Vi", _fWordmark);
-    text(L"key", _fWordmark, D2D1::RectF(wx - keyW, fy, wx, HEIGHT), _bBrand); wx -= keyW;
-    text(L"Vi", _fWordmark, D2D1::RectF(wx - viW, fy, wx, HEIGHT), _bText); wx -= viW + 5;
-    HICON icon = (HICON)LoadImageW(_inst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON, 16, 16, LR_DEFAULTCOLOR);
-    if (icon) {   // the app icon through GDI on the same surface, after D2D is done with this frame
-        ICONINFO ii; if (GetIconInfo(icon, &ii)) {
-            BITMAP bm; GetObject(ii.hbmColor, sizeof(bm), &bm); std::vector<DWORD> px(bm.bmWidth * bm.bmHeight);
-            BITMAPINFO bi = {}; bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = bm.bmWidth; bi.bmiHeader.biHeight = -bm.bmHeight; bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-            HDC dc = GetDC(nullptr); GetDIBits(dc, ii.hbmColor, 0, bm.bmHeight, px.data(), &bi, DIB_RGB_COLORS); ReleaseDC(nullptr, dc);
-            for (auto& p : px) { BYTE a = p >> 24; if (a && a < 255) { BYTE r = (BYTE)(((p >> 16) & 255) * a / 255), g = (BYTE)(((p >> 8) & 255) * a / 255), b = (BYTE)((p & 255) * a / 255); p = (a << 24) | (r << 16) | (g << 8) | b; } }
-            ID2D1Bitmap* bmp = nullptr; _rt->CreateBitmap(D2D1::SizeU(bm.bmWidth, bm.bmHeight), px.data(), bm.bmWidth * 4, D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &bmp);
-            if (bmp) { _rt->DrawBitmap(bmp, D2D1::RectF(wx - 16, fy + 14, wx, fy + 30), 0.85f); bmp->Release(); }
-            DeleteObject(ii.hbmColor); DeleteObject(ii.hbmMask);
-        }
-        DestroyIcon(icon);
+    float wx = tr.left - 10 - 10; float keyW = textWidth(L"Key", _fWordmark), hW = textWidth(L"H", _fWordmark);
+    text(L"Key", _fWordmark, D2D1::RectF(wx - keyW, fy, wx, HEIGHT), _bBrand); wx -= keyW;
+    text(L"H", _fWordmark, D2D1::RectF(wx - hW, fy, wx, HEIGHT), _bText); wx -= hW + 5;
+    if (_footerIconBmp) {
+        _rt->DrawBitmap(_footerIconBmp, D2D1::RectF(wx - 16, fy + 14, wx, fy + 30), 0.85f);
     }
     if (_rt->EndDraw() == D2DERR_RECREATE_TARGET) dropGraphics();
 }
@@ -444,10 +496,10 @@ static void choose(const Emoji* e) {
     close();
     core::insertText(t);
 }
-static int cellAt(int px, int py) {   // index of the emoji under the point (client pixels), -1 if none
+static int cellAt(int px, int py) {
     float x = px * 96.0f / _dpi, y = py * 96.0f / _dpi;
     if (y < SEARCH_H + 1 || y > HEIGHT - FOOTER_H - 1) return -1;
-    for (auto& r : _rows) { if (r.header) continue; float ry = gridTop() + r.y - _scrollY; if (y >= ry && y < ry + r.h) { int c = (int)((x - GRID_X) / CELL); return x >= GRID_X && c < r.count ? r.start + c : -1; } }
+    for (auto& r : _rows) { if (r.header) continue; float ry = gridTop() + r.y - _scrollY; if (y >= ry && y < ry + r.h) { int c = (int)((x - GRID_X) / CELL); return x >= GRID_X && c >= 0 && c < r.count ? r.start + c : -1; } }
     return -1;
 }
 static wchar_t charFor(DWORD vk, unsigned flags) {
@@ -456,10 +508,10 @@ static wchar_t charFor(DWORD vk, unsigned flags) {
     int n = ToUnicodeEx(vk, MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, hkl), ks, buf, 8, 1 << 2, hkl);
     return n == 1 && buf[0] >= 0x20 ? buf[0] : 0;
 }
-static void onKey(DWORD vk, unsigned flags) {   // from the keyboard hook (WM_APP+10); EmojiPanel.keyDown
-    bool ctrl = flags & 2, alt = flags & 4, win = flags & 8;
+static void onKey(DWORD vk, unsigned flags) {   // from the keyboard hook (WM_APP+10)
+    bool ctrl = (flags & 2) != 0, alt = (flags & 4) != 0, win = (flags & 8) != 0;
     switch (vk) {
-    case VK_ESCAPE: if (_raw.empty()) close(); else setRaw(L""); break;   // Esc: clears the search, then closes
+    case VK_ESCAPE: if (_raw.empty()) close(); else setRaw(L""); break;
     case VK_RETURN: choose(_current()); return;
     case VK_LEFT: _allSelected = false; move(-1); break;
     case VK_RIGHT: _allSelected = false; move(1); break;
@@ -468,9 +520,35 @@ static void onKey(DWORD vk, unsigned flags) {   // from the keyboard hook (WM_AP
     case VK_BACK: (ctrl || _allSelected) ? setRaw(L"") : alt ? deleteWord() : deleteBack(); break;
     default:
         if (ctrl && !alt) {
-            if (vk == 'V') { if (OpenClipboard(nullptr)) { HANDLE h = GetClipboardData(CF_UNICODETEXT); if (h) { const wchar_t* s = (const wchar_t*)GlobalLock(h); if (s) { typeText(s); GlobalUnlock(h); } } CloseClipboard(); } }
+            if (vk == 'V') {
+                if (OpenClipboard(_win)) {
+                    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+                    if (h) { const wchar_t* s = (const wchar_t*)GlobalLock(h); if (s) { typeText(s); GlobalUnlock(h); } }
+                    CloseClipboard();
+                }
+            }
             else if (vk == 'A') { if (!_raw.empty()) _allSelected = true; }
-            else if (vk == 'C' || vk == 'X') { if (_allSelected && !_raw.empty()) { std::wstring d = _display(); if (OpenClipboard(nullptr)) { EmptyClipboard(); HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (d.size() + 1) * 2); if (g) { memcpy(GlobalLock(g), d.c_str(), (d.size() + 1) * 2); GlobalUnlock(g); SetClipboardData(CF_UNICODETEXT, g); } CloseClipboard(); } if (vk == 'X') setRaw(L""); } }
+            else if (vk == 'C' || vk == 'X') {
+                if (_allSelected && !_raw.empty()) {
+                    std::wstring d = _display();
+                    if (OpenClipboard(_win)) {
+                        EmptyClipboard();
+                        HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (d.size() + 1) * sizeof(wchar_t));
+                        if (g) {
+                            void* dst = GlobalLock(g);
+                            if (dst) {
+                                memcpy(dst, d.c_str(), (d.size() + 1) * sizeof(wchar_t));
+                                GlobalUnlock(g);
+                                if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
+                            } else {
+                                GlobalFree(g);
+                            }
+                        }
+                        CloseClipboard();
+                    }
+                    if (vk == 'X') setRaw(L"");
+                }
+            }
             else if (vk == 'W') { close(); return; }
             break;
         }
@@ -488,7 +566,7 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_APP + 11: close(); return 0;
     case WM_APP + 12: if (w >= 0x20) { typeText(std::wstring(1, (wchar_t)w)); InvalidateRect(h, nullptr, FALSE); } return 0;
     case WM_TIMER: if (w == TIMER_CARET) { _caret = !_caret; InvalidateRect(h, nullptr, FALSE); } return 0;
-    case WM_MOUSEMOVE: {   // hover selects only when the mouse really moved (not when the grid scrolled under it)
+    case WM_MOUSEMOVE: {
         POINT p; GetCursorPos(&p); if (p.x == _lastMouse.x && p.y == _lastMouse.y) return 0; _lastMouse = p;
         int i = cellAt(GET_X_LPARAM(l), GET_Y_LPARAM(l)); if (i >= 0 && i != _selected) { _selected = i; InvalidateRect(h, nullptr, FALSE); }
         return 0; }
@@ -499,16 +577,24 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0; }
     case WM_MOUSEWHEEL: { _scrollY -= GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * CELL; clampScroll(); InvalidateRect(h, nullptr, FALSE); return 0; }
     case WM_SETCURSOR: SetCursor(LoadCursor(nullptr, IDC_ARROW)); return TRUE;
-    case WM_DPICHANGED: _dpi = (float)HIWORD(w); dropGraphics(); return 0;
+    case WM_DPICHANGED: {
+        _dpi = (float)HIWORD(w);
+        RECT* pr = (RECT*)l;
+        SetWindowPos(h, nullptr, pr->left, pr->top, pr->right - pr->left, pr->bottom - pr->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        dropGraphics();
+        InvalidateRect(h, nullptr, FALSE);
+        return 0;
+    }
     case WM_DESTROY: dropGraphics(); _win = nullptr; return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
 static void prepare() {
     if (_win) return;
+    HINSTANCE hMod = _inst ? _inst : GetModuleHandleW(nullptr);
     static bool reg = false;
-    if (!reg) { WNDCLASSW wc = {}; wc.lpfnWndProc = proc; wc.hInstance = _inst; wc.lpszClassName = L"VikeyEmoji"; wc.style = CS_DROPSHADOW; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); RegisterClassW(&wc); reg = true; }
-    _win = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"VikeyEmoji", L"Vikey Emoji", WS_POPUP, 0, 0, (int)WIDTH, (int)HEIGHT, nullptr, nullptr, _inst, nullptr);
+    if (!reg) { WNDCLASSW wc = {}; wc.lpfnWndProc = proc; wc.hInstance = hMod; wc.lpszClassName = L"HKeyEmoji"; wc.style = CS_DROPSHADOW; wc.hCursor = LoadCursor(nullptr, IDC_ARROW); RegisterClassW(&wc); reg = true; }
+    _win = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, L"HKeyEmoji", L"HKey Emoji", WS_POPUP, 0, 0, (int)WIDTH, (int)HEIGHT, nullptr, nullptr, hMod, nullptr);
     DWORD pref = 2 /* DWMWCP_ROUND */; DwmSetWindowAttribute(_win, 33 /* DWMWA_WINDOW_ROUNDED_PREFERENCE */, &pref, sizeof(pref));
     COLORREF border = RGB(214, 214, 218); DwmSetWindowAttribute(_win, 34 /* DWMWA_BORDER_COLOR */, &border, sizeof(border));
 }
@@ -521,12 +607,27 @@ void install(HINSTANCE inst) {
 void settingsChanged() { if (prefs::getInt(L"EmojiPicker", 0)) prepare(); }
 bool isOpen() { return _open; }
 void toggle() { _open ? close() : open(); }
+static UINT windowDpi(HWND hwnd) {
+    using Fn = UINT (WINAPI*)(HWND);
+    static Fn fn = (Fn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    if (fn && hwnd) {
+        UINT d = fn(hwnd);
+        if (d) return d;
+    }
+    HDC dc = GetDC(hwnd);
+    int d = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+    if (dc) ReleaseDC(hwnd, dc);
+    return d > 0 ? (UINT)d : 96u;
+}
 void open() {
     loadIndex(); prepare(); if (!_win) return;
     resetModel(core::language() == 1);
     POINT p; GetCursorPos(&p); HMONITOR mon = MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST); MONITORINFO mi = {sizeof(mi)}; GetMonitorInfoW(mon, &mi);
-    UINT dpi = GetDpiForWindow(_win); _dpi = (float)dpi; float s = dpi / 96.0f;
-    int w = (int)(WIDTH * s), hgt = (int)(HEIGHT * s); RECT a = mi.rcWork;
+    RECT a = mi.rcWork;
+    // Move to target monitor first so GetDpiForWindow returns that monitor's DPI
+    SetWindowPos(_win, HWND_TOPMOST, a.left, a.top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+    UINT dpi = windowDpi(_win); _dpi = (float)dpi; float s = _dpi / 96.0f;
+    int w = (int)(WIDTH * s), hgt = (int)(HEIGHT * s);
     int x = (a.left + a.right) / 2 - w / 2, y = (a.top + a.bottom) / 2 - hgt / 2 - (int)((a.bottom - a.top) * 0.08);
     dropGraphics();
     SetWindowPos(_win, HWND_TOPMOST, x, y, w, hgt, SWP_NOACTIVATE | SWP_SHOWWINDOW);
@@ -541,4 +642,4 @@ void close() {
 }
 void languageChanged(int lang) { if (_vietnamese != (lang == 1)) { _vietnamese = lang == 1; if (_open) { doSearch(); InvalidateRect(_win, nullptr, FALSE); } } }
 
-}} // namespace
+}} // namespace vikey::emoji

@@ -17,6 +17,9 @@ if (-not $hasMsvc -and ($env:GITHUB_ACTIONS -ne 'true')) {
         $env:Path = "$toolchainBin;$env:Path"
         $cmakeExtra = @('-DCMAKE_CXX_COMPILER=g++', '-DCMAKE_C_COMPILER=gcc')
         $wantCompiler = 'gcc'
+    } elseif ($null -ne (Get-Command g++.exe -ErrorAction SilentlyContinue)) {
+        $cmakeExtra = @('-DCMAKE_CXX_COMPILER=g++', '-DCMAKE_C_COMPILER=gcc')
+        $wantCompiler = 'gcc'
     }
 }
 
@@ -24,7 +27,9 @@ $cacheFile = Join-Path $buildDir "CMakeCache.txt"
 if (Test-Path $cacheFile) {
     $cacheText = Get-Content $cacheFile -Raw
     $isGccCache = $cacheText -match 'CMAKE_CXX_COMPILER:.*g\+\+'
-    if (($wantCompiler -eq 'msvc' -and $isGccCache) -or ($wantCompiler -eq 'gcc' -and -not $isGccCache)) {
+    $cachedCxx = if ($cacheText -match 'CMAKE_CXX_COMPILER:FILEPATH=([^\r\n]+)') { $Matches[1].Trim() } else { '' }
+    $missingCachedCxx = $cachedCxx -and -not (Test-Path $cachedCxx)
+    if ($missingCachedCxx -or ($wantCompiler -eq 'msvc' -and $isGccCache) -or ($wantCompiler -eq 'gcc' -and -not $isGccCache)) {
         Remove-Item -Recurse -Force $buildDir
     }
 }

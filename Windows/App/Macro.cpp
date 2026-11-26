@@ -5,22 +5,26 @@
 #include <shellapi.h>
 #include <vector>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <atomic>
 #include <algorithm>
-#include <fstream>
 
 namespace vikey { namespace macro {
 
-static bool _enabled = true;
+using MacroTable = std::map<std::wstring, std::wstring>;
+static std::atomic<bool> _enabled{true};
 static std::wstring _activeFilePath;
 static FILETIME _lastModTime = {0, 0};
-static std::map<std::wstring, std::wstring> _table; // lowercased shortcut -> replacement
+static std::mutex _tableMutex;
+static std::shared_ptr<const MacroTable> _table = std::make_shared<const MacroTable>(); // lowercased shortcut -> replacement
 static std::wstring _buffer;
 static bool _bufferCapsLock = false;
 static bool _bufferOverflow = false;
 
 static std::wstring toLowerStr(const std::wstring& s) {
     std::wstring out = s;
-    CharLowerBuffW(out.data(), (DWORD)out.size());
+    if (!out.empty()) CharLowerBuffW(&out[0], (DWORD)out.size());
     return out;
 }
 
@@ -47,31 +51,43 @@ static FILETIME getFileModTime(const std::wstring& path) {
 }
 
 std::wstring macroFilePath() {
-    if (!_activeFilePath.empty() && fileExists(_activeFilePath)) {
-        return _activeFilePath;
+    {
+        std::lock_guard<std::mutex> lk(_tableMutex);
+        if (!_activeFilePath.empty() && fileExists(_activeFilePath)) {
+            return _activeFilePath;
+        }
     }
 
-    // 1. Check directory of Vikey.exe (Portable mode)
+    // 1. Check directory of HKey.exe (Portable mode)
     std::wstring exeDir = getExeDir();
     std::wstring portable = exeDir + L"\\macro.txt";
     if (fileExists(portable)) {
+        std::lock_guard<std::mutex> lk(_tableMutex);
         _activeFilePath = portable;
         return portable;
     }
 
-    // 2. Fallback to %APPDATA%\Vikey\macro.txt
+    // 2. Check %APPDATA%\HKey\macro.txt (and legacy %APPDATA%\Vikey\macro.txt)
     wchar_t appData[MAX_PATH] = {0};
     if (SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, appData) == S_OK) {
-        std::wstring adFile = std::wstring(appData) + L"\\Vikey\\macro.txt";
-        if (fileExists(adFile)) {
-            _activeFilePath = adFile;
-            return adFile;
+        std::wstring hkeyAd = std::wstring(appData) + L"\\HKey\\macro.txt";
+        if (fileExists(hkeyAd)) {
+            std::lock_guard<std::mutex> lk(_tableMutex);
+            _activeFilePath = hkeyAd;
+            return hkeyAd;
+        }
+        std::wstring legacyAd = std::wstring(appData) + L"\\Vikey\\macro.txt";
+        if (fileExists(legacyAd)) {
+            std::lock_guard<std::mutex> lk(_tableMutex);
+            _activeFilePath = legacyAd;
+            return legacyAd;
         }
     }
 
-    // 3. Fallback to %LOCALAPPDATA%\Vikey\macro.txt
+    // 3. Fallback to %LOCALAPPDATA%\HKey\macro.txt
     std::wstring ladFile = prefs::appDataDir() + L"\\macro.txt";
     if (fileExists(ladFile)) {
+        std::lock_guard<std::mutex> lk(_tableMutex);
         _activeFilePath = ladFile;
         return ladFile;
     }
@@ -81,18 +97,21 @@ std::wstring macroFilePath() {
     if (hTest != INVALID_HANDLE_VALUE) {
         CloseHandle(hTest);
         DeleteFileW(portable.c_str());
+        std::lock_guard<std::mutex> lk(_tableMutex);
         _activeFilePath = portable;
         return portable;
     }
 
-    // Fallback: writable AppData directory
+    // Fallback: writable %APPDATA%\HKey\macro.txt
     if (appData[0] != 0) {
-        std::wstring dir = std::wstring(appData) + L"\\Vikey";
+        std::wstring dir = std::wstring(appData) + L"\\HKey";
         CreateDirectoryW(dir.c_str(), nullptr);
+        std::lock_guard<std::mutex> lk(_tableMutex);
         _activeFilePath = dir + L"\\macro.txt";
         return _activeFilePath;
     }
 
+    std::lock_guard<std::mutex> lk(_tableMutex);
     _activeFilePath = ladFile;
     return ladFile;
 }
@@ -108,7 +127,7 @@ static void createSampleFile(const std::wstring& path) {
 
     const char sample[] =
         "; ===================================================================\r\n"
-        "; BẢNG GÕ TẮT VIKEY (macro.txt)\r\n"
+        "; BẢNG GÕ TẮT HKEY (macro.txt)\r\n"
         "; Định dạng hỗ trợ: phím_tắt:từ_thay_thế hoặc phím_tắt||từ_thay_thế\r\n"
         "; Tự động giữ hoa/thường: k -> không, K -> Không, K(Caps) -> KHÔNG\r\n"
         "; ===================================================================\r\n"
@@ -116,7 +135,7 @@ static void createSampleFile(const std::wstring& path) {
         "dc:được\r\n"
         "ng:người\r\n"
         "vn:Việt Nam\r\n"
-        "vk:Vikey\r\n"
+        "hk:HKey\r\n"
         "fbb:https://facebook.com\r\n";
 
     WriteFile(h, sample, (DWORD)(sizeof(sample) - 1), &written, nullptr);
@@ -132,15 +151,17 @@ void reload() {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
 
-    DWORD size = GetFileSize(h, nullptr);
-    if (size == 0) {
+    LARGE_INTEGER liSize = {};
+    if (!GetFileSizeEx(h, &liSize) || liSize.QuadPart < 0 || liSize.QuadPart > (16LL << 20)) {
         CloseHandle(h);
-        _table.clear();
-        _lastModTime = getFileModTime(path);
         return;
     }
-    if (size == INVALID_FILE_SIZE) {
+    DWORD size = (DWORD)liSize.QuadPart;
+    if (size == 0) {
         CloseHandle(h);
+        std::lock_guard<std::mutex> lk(_tableMutex);
+        _table = std::make_shared<const MacroTable>();
+        _lastModTime = getFileModTime(path);
         return;
     }
 
@@ -161,17 +182,16 @@ void reload() {
         size_t wcharCount = (readBytes - 2) / sizeof(wchar_t);
         text.assign((const wchar_t*)(data.data() + 2), wcharCount);
     } else {
-        // UTF-8 (with or without BOM)
+        // UTF-8 (strict check first so ANSI files fall back cleanly to CP_ACP)
         size_t offset = 0;
         if (readBytes >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
             offset = 3;
         }
-        int len = MultiByteToWideChar(CP_UTF8, 0, (const char*)(data.data() + offset), (int)(readBytes - offset), nullptr, 0);
+        int len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char*)(data.data() + offset), (int)(readBytes - offset), nullptr, 0);
         if (len > 0) {
             text.resize(len);
-            MultiByteToWideChar(CP_UTF8, 0, (const char*)(data.data() + offset), (int)(readBytes - offset), &text[0], len);
+            MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char*)(data.data() + offset), (int)(readBytes - offset), &text[0], len);
         } else {
-            // Fallback ANSI
             len = MultiByteToWideChar(CP_ACP, 0, (const char*)(data.data() + offset), (int)(readBytes - offset), nullptr, 0);
             if (len > 0) {
                 text.resize(len);
@@ -180,7 +200,7 @@ void reload() {
         }
     }
 
-    std::map<std::wstring, std::wstring> newTable;
+    auto newTable = std::make_shared<MacroTable>();
 
     // Parse lines
     size_t start = 0;
@@ -221,37 +241,55 @@ void reload() {
         if (sEnd != std::wstring::npos) shortcut = shortcut.substr(0, sEnd + 1);
         if (shortcut.empty()) continue;
 
-        // Unescape \n and \t in replacement if any
+        // Unescape \n, \t, and \\ in replacement
         std::wstring unescaped;
+        unescaped.reserve(repl.size());
         for (size_t i = 0; i < repl.size(); i++) {
             if (repl[i] == L'\\' && i + 1 < repl.size()) {
-                if (repl[i + 1] == L'n') { unescaped += L"\r\n"; i++; }
-                else if (repl[i + 1] == L't') { unescaped += L"\t"; i++; }
+                if (repl[i + 1] == L'n') { unescaped += L'\n'; i++; }
+                else if (repl[i + 1] == L'r') { i++; }
+                else if (repl[i + 1] == L't') { unescaped += L'\t'; i++; }
+                else if (repl[i + 1] == L'\\') { unescaped += L'\\'; i++; }
                 else { unescaped += repl[i]; }
             } else {
                 unescaped += repl[i];
             }
         }
 
-        newTable[toLowerStr(shortcut)] = unescaped;
+        (*newTable)[toLowerStr(shortcut)] = unescaped;
     }
 
+    std::lock_guard<std::mutex> lk(_tableMutex);
     _table = std::move(newTable);
     _lastModTime = currentMod;
 }
 
+void reloadIfModified() {
+    if (!_enabled.load(std::memory_order_relaxed)) return;
+    FILETIME currentMod = getFileModTime(macroFilePath());
+    FILETIME lastMod;
+    {
+        std::lock_guard<std::mutex> lk(_tableMutex);
+        lastMod = _lastModTime;
+    }
+    if (lastMod.dwLowDateTime == 0xFFFFFFFF && lastMod.dwHighDateTime == 0xFFFFFFFF) return;
+    if (CompareFileTime(&currentMod, &lastMod) != 0) {
+        reload();
+    }
+}
+
 void init() {
-    _enabled = prefs::getInt(L"UseMacro", 1) != 0;
+    _enabled.store(prefs::getInt(L"UseMacro", 1) != 0, std::memory_order_relaxed);
     reload();
 }
 
 bool isEnabled() {
-    return _enabled;
+    return _enabled.load(std::memory_order_relaxed);
 }
 
-void setEnabled(bool on) {
-    _enabled = on;
-    prefs::setInt(L"UseMacro", on ? 1 : 0);
+void setEnabled(bool on, bool persist) {
+    _enabled.store(on, std::memory_order_relaxed);
+    if (persist) prefs::setInt(L"UseMacro", on ? 1 : 0);
     if (!on) reset();
 }
 
@@ -264,7 +302,7 @@ void openMacroFile() {
 }
 
 void onChar(wchar_t c, bool capsLock) {
-    if (!_enabled) return;
+    if (!_enabled.load(std::memory_order_relaxed)) return;
     if (c == 0 || c < 32) return;
     if (_bufferOverflow) return;
     if (_buffer.empty()) {
@@ -312,19 +350,17 @@ bool isDelimiter(WORD vk, unsigned short engineKey, bool shift) {
 static std::wstring applyCasing(const std::wstring& typed, const std::wstring& templateRepl, bool capsLock) {
     if (typed.empty() || templateRepl.empty()) return templateRepl;
 
-    // Check if typed shortcut is all uppercase letters
     bool allUpper = true;
     bool hasLetter = false;
     for (wchar_t c : typed) {
-        if (iswalpha(c)) {
+        if (IsCharAlphaW(c)) {
             hasLetter = true;
-            if (!iswupper(c)) { allUpper = false; break; }
+            if (!IsCharUpperW(c)) { allUpper = false; break; }
         }
     }
 
     if (hasLetter && allUpper) {
-        // If single letter: only uppercase entirely if CapsLock was on;
-        // if typed with Shift, it's Title Case (e.g. K -> Không)
+        // Single letter: Title Case with Shift, ALL CAPS with CapsLock
         if (typed.size() == 1 && !capsLock) {
             std::wstring res = templateRepl;
             CharUpperBuffW(&res[0], 1);
@@ -332,12 +368,11 @@ static std::wstring applyCasing(const std::wstring& typed, const std::wstring& t
         }
 
         std::wstring res = templateRepl;
-        CharUpperBuffW(res.data(), (DWORD)res.size());
+        CharUpperBuffW(&res[0], (DWORD)res.size());
         return res;
     }
 
-    // Check if first character is uppercase (Title Case)
-    if (iswupper(typed[0])) {
+    if (IsCharUpperW(typed[0])) {
         std::wstring res = templateRepl;
         CharUpperBuffW(&res[0], 1);
         return res;
@@ -365,32 +400,26 @@ static std::wstring collapseDoubleKeys(const std::wstring& s) {
 }
 
 bool match(std::wstring& outReplacement, int& outShortcutLen, bool allowTelexCollapse) {
-    if (!_enabled || _buffer.empty() || _bufferOverflow) return false;
+    if (!_enabled.load(std::memory_order_relaxed) || _buffer.empty() || _bufferOverflow) return false;
 
-    // Hot-reload check on disk modification (throttled to at most once per second)
-    static ULONGLONG lastCheckTick = 0;
-    ULONGLONG now = GetTickCount64();
-    if (now - lastCheckTick > 1000) {
-        lastCheckTick = now;
-        FILETIME currentMod = getFileModTime(macroFilePath());
-        if (CompareFileTime(&currentMod, &_lastModTime) != 0) {
-            reload();
-        }
+    std::shared_ptr<const MacroTable> tbl;
+    {
+        std::lock_guard<std::mutex> lk(_tableMutex);
+        tbl = _table;
     }
+    if (!tbl || tbl->empty()) return false;
 
     std::wstring key = toLowerStr(_buffer);
-    auto it = _table.find(key);
+    auto it = tbl->find(key);
 
-    // Match Unicode shortcuts (e.g. "đc") when typed via raw Telex double-keys ("ddc") in VN mode,
-    // without stripping diacritics back to ASCII ("dc") so "đc" never triggers macro "dc".
-    if (it == _table.end() && allowTelexCollapse) {
+    if (it == tbl->end() && allowTelexCollapse) {
         std::wstring collapsed = collapseDoubleKeys(key);
         if (collapsed != key) {
-            it = _table.find(collapsed);
+            it = tbl->find(collapsed);
         }
     }
 
-    if (it != _table.end()) {
+    if (it != tbl->end()) {
         outShortcutLen = (int)_buffer.size();
         outReplacement = applyCasing(_buffer, it->second, _bufferCapsLock);
         return true;
@@ -400,12 +429,15 @@ bool match(std::wstring& outReplacement, int& outShortcutLen, bool allowTelexCol
 }
 
 size_t count() {
-    return _table.size();
+    std::lock_guard<std::mutex> lk(_tableMutex);
+    return _table ? _table->size() : 0;
 }
 
 void setTableForTesting(const std::map<std::wstring, std::wstring>& table) {
-    _table = table;
-    _enabled = true;
+    auto t = std::make_shared<MacroTable>(table);
+    std::lock_guard<std::mutex> lk(_tableMutex);
+    _table = std::move(t);
+    _enabled.store(true, std::memory_order_relaxed);
     _lastModTime.dwLowDateTime = 0xFFFFFFFF;
     _lastModTime.dwHighDateTime = 0xFFFFFFFF;
 }

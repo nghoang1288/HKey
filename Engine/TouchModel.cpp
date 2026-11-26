@@ -42,6 +42,7 @@ char TouchModel::pick(float x, float y, const char* prefix, int vietnamese, cons
     int nearest = -1; float bestD = 1e30f;
     for (int i = 0; i < n; i++) {
         const TMKey& k = keys[i];
+        if (k.w <= 0 || k.h <= 0) continue;
         float cx = k.x + k.w / 2, cy = k.y + k.h / 2;
         float dx = (x - cx) / k.w, dy = (y - cy) / k.h;
         if (fabsf(dx) * 2 <= sureZone && fabsf(dy) * 2 <= sureZone) return k.letter;   // clearly this key
@@ -55,6 +56,7 @@ char TouchModel::pick(float x, float y, const char* prefix, int vietnamese, cons
     double best = -1e300; char letter = keys[nearest].letter;
     for (int i = 0; i < n; i++) {
         const TMKey& k = keys[i];
+        if (k.w <= 0 || k.h <= 0) continue;
         float cx = k.x + k.w / 2, cy = k.y + k.h / 2;
         float dx = (x - cx) / (k.w * sigma), dy = (y - cy) / (k.h * sigmaY);
         double spatial = -0.5 * (dx * dx + dy * dy);          // log of a 2D Gaussian
@@ -74,14 +76,15 @@ static const TMKey* keyFor(char c, const TMKey* keys, int n) { for (int i = 0; i
 /** log P(touch at x,y | meant key c) up to a constant; without a touch, how close c is to the typed key. */
 static double spatial(char typed, char c, float x, float y, bool haveTouch, const TMKey* keys, int n) {
     const TMKey* k = keyFor(c, keys, n);
-    if (!k) return -20;
+    if (!k || k->w <= 0 || k->h <= 0) return -20;
     float px = x, py = y;
-    if (!haveTouch) { const TMKey* t = keyFor(typed, keys, n); if (!t) return -20; px = t->x + t->w / 2; py = t->y + t->h / 2; }
+    if (!haveTouch) { const TMKey* t = keyFor(typed, keys, n); if (!t || t->w <= 0 || t->h <= 0) return -20; px = t->x + t->w / 2; py = t->y + t->h / 2; }
     float dx = (px - (k->x + k->w / 2)) / (k->w * TouchModel::sigma), dy = (py - (k->y + k->h / 2)) / (k->h * TouchModel::sigmaY);
     return -0.5 * (dx * dx + dy * dy);
 }
 
 static void addCandidate(const char* letters, double editCost, int mode, TMCandidate* out, int& count, int max) {
+    if (max <= 0 || !out) return;
     for (int v = 0; v < 2; v++) {
         unsigned short text[48]; int len = 0;
         int s = vAutoSwitchWordScore(v, letters, text, &len);
@@ -101,6 +104,7 @@ static void addCandidate(const char* letters, double editCost, int mode, TMCandi
 }
 
 int TouchModel::candidates(const char* typed, const float* tx, const float* ty, int vietnamese, const TMKey* keys, int n, TMCandidate* out, int max) {
+    if (!typed || !out || max <= 0) return 0;
     int L = (int)strlen(typed), count = 0;
     if (L < 1 || L > 24) return 0;
     char w[32];
@@ -159,8 +163,10 @@ static bool inflected(const char* w) {
 const char* TouchModel::keepWords = "";
 
 bool TouchModel::shouldCorrect(const char* typed, const TMCandidate* c, int count) {
-    if (count == 0 || !strcmp(c[0].letters, typed)) return false;          // best is what was typed
+    if (!typed || !c || count <= 0 || !strcmp(c[0].letters, typed)) return false;          // best is what was typed
     for (int i = 0; i < count; i++) if (!strcmp(c[i].letters, typed)) return false;   // the typed word is a real word: keep it
+    if (vAutoSwitchWordScore(0, typed, nullptr, nullptr) > -1000 ||
+        vAutoSwitchWordScore(1, typed, nullptr, nullptr) > -1000) return false;
     if (strlen(typed) < 3) return false;                                   // too little to go on (ok, ko, j…)
     // a real stem + ending (githubs, tweeted): keep it, unless the fix is the same word spelled right (occured -> occurred)
     if (inflected(typed)) {
@@ -176,11 +182,14 @@ bool TouchModel::shouldCorrect(const char* typed, const TMCandidate* c, int coun
         if (cmp < 0) lo = mid + 1; else hi = mid - 1;
     }
     // more words to keep, for experiments (one per line)
-    size_t tl = strlen(typed);
-    for (const char* p = keepWords; *p; ) {
-        const char* e = strchr(p, '\n'); size_t n = e ? (size_t)(e - p) : strlen(p);
-        if (n == tl && !strncmp(p, typed, n)) return false;
-        p += n + (e ? 1 : 0);
+    if (keepWords) {
+        size_t tl = strlen(typed);
+        for (const char* p = keepWords; *p; ) {
+            const char* e = strchr(p, '\n'); size_t n = e ? (size_t)(e - p) : strlen(p);
+            size_t ln = (n > 0 && p[n - 1] == '\r') ? n - 1 : n;
+            if (ln == tl && !strncmp(p, typed, ln)) return false;
+            p += n + (e ? 1 : 0);
+        }
     }
     double margin = count > 1 ? c[0].score - c[1].score : 10;
     // a long word that is no word in either language (nor kept) is almost surely a slip: trust rarer fixes

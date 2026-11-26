@@ -11,15 +11,19 @@
 #include <iostream>
 #include <memory.h>
 
+using namespace std;
+
 //main data, i use `map` because it has O(Log(n))
 static map<string, Int8> _smartSwitchKeyData;
 static string _cacheKey = ""; //use cache for faster
 static Int8 _cacheData = 0; //use cache for faster
+static bool _hasCache = false;
 
 void initSmartSwitchKey(const Byte* pData, const int& size) {
     _smartSwitchKeyData.clear();
     _cacheKey.clear();
     _cacheData = 0;
+    _hasCache = false;
     if (pData == NULL || size < 2) return;
     Uint16 count = 0;
     Uint32 cursor = 0;
@@ -52,6 +56,7 @@ void sanitizeSmartSwitchKeyEntries(const std::vector<std::string>& browserExeLis
     }
     _cacheKey.clear();
     _cacheData = 0;
+    _hasCache = false;
 }
 
 void getSmartSwitchKeySaveData(vector<Byte>& outData) {
@@ -60,6 +65,7 @@ void getSmartSwitchKeySaveData(vector<Byte>& outData) {
     for (std::map<string, Int8>::iterator it = _smartSwitchKeyData.begin(); it != _smartSwitchKeyData.end(); ++it) {
         if (it->first.length() > 0 && it->first.length() <= 255) {
             validEntries.push_back(*it);
+            if (validEntries.size() == 65535) break;
         }
     }
     Uint16 count = (Uint16)validEntries.size();
@@ -76,16 +82,18 @@ void getSmartSwitchKeySaveData(vector<Byte>& outData) {
 }
 
 int getAppInputMethodStatus(const string& bundleId, const int& currentInputMethod) {
-    if (_cacheKey.compare(bundleId) == 0) {
+    if (_hasCache && _cacheKey.compare(bundleId) == 0) {
         return _cacheData;
     }
     if (_smartSwitchKeyData.find(bundleId) != _smartSwitchKeyData.end()) {
         _cacheKey = bundleId;
         _cacheData = _smartSwitchKeyData[bundleId];
+        _hasCache = true;
         return _cacheData;
     }
     _cacheKey = bundleId;
     _cacheData = currentInputMethod;
+    _hasCache = true;
     _smartSwitchKeyData[bundleId] = _cacheData;
     return -1;
 }
@@ -94,4 +102,5 @@ void setAppInputMethodStatus(const string& bundleId, const int& language) {
     _smartSwitchKeyData[bundleId] = language;
     _cacheKey = bundleId;
     _cacheData = language;
+    _hasCache = true;
 }

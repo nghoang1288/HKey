@@ -9,9 +9,8 @@
 #ifndef DataType_h
 #define DataType_h
 
+#include <cstdint>
 #include <vector>
-
-using namespace std;
 
 //#define V_PLATFORM_MAC              1
 //#define V_PLATFORM_WINDOWS          2
@@ -36,7 +35,7 @@ typedef signed char Int8;
 typedef unsigned char Uint8;
 typedef unsigned short Uint16;
 typedef unsigned int Uint32;
-typedef unsigned long int Uint64;
+typedef uint64_t Uint64;
 
 enum HoolCodeState {
     vDoNothing = 0, //do not do anything
