@@ -3,7 +3,7 @@
 #include "HKeyVersion.h"
 
 #ifndef HKEY_VERSION_STR
-#define HKEY_VERSION_STR "1.2.1"
+#define HKEY_VERSION_STR "1.2.2"
 #endif
 #ifndef HKEY_VER_MAJOR
 #define HKEY_VER_MAJOR 1
@@ -12,7 +12,7 @@
 #define HKEY_VER_MINOR 2
 #endif
 #ifndef HKEY_VER_PATCH
-#define HKEY_VER_PATCH 1
+#define HKEY_VER_PATCH 2
 #endif
 
 IDI_APP ICON "HKey.ico"

@@ -25,7 +25,7 @@
 namespace vikey { namespace updater {
 
 #ifndef HKEY_VERSION
-#define HKEY_VERSION "1.2.1"
+#define HKEY_VERSION "1.2.2"
 #endif
 
 #define WIDEN2(x) L ## x

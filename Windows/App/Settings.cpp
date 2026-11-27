@@ -2,7 +2,7 @@
 #ifdef VIKEY_VERSION
 #define HKEY_VERSION VIKEY_VERSION
 #else
-#define HKEY_VERSION "1.2.1"
+#define HKEY_VERSION "1.2.2"
 #endif
 #endif
 #ifndef HKEY_VERSION_W
@@ -331,7 +331,7 @@ static void destroyChildren(HWND h) { std::vector<HWND> kids; for (HWND c = GetW
 // ---- main window -----------------------------------------------------------------------------
 enum { C_SEG = 200, C_HOTKEY, C_BEEP, C_AUTO, C_PAUSE, C_SMART, C_SITE, C_MARK, C_SPELL, C_RESTORE, C_MACRO, C_MACROFILE, C_LOGIN, C_UPDATE, C_LOGKEYS, C_EMOJI, C_EMOJIKEY,
        C_ROTATION, C_BLACKLIST_TOGGLE, C_BLACKLIST_BTN,
-       C_AUTOCAP, C_TERMDELAY_TOGGLE, C_TERMDELAY_MS, C_FEEDBACK,
+       C_AUTOCAP, C_AUTOCORRECT, C_TERMDELAY_TOGGLE, C_TERMDELAY_MS, C_FEEDBACK,
        BL_LIST = 280, BL_ADD_RUNNING, BL_ADD_FILE, BL_REMOVE, BL_RESET, BL_CLOSE,
        L_REFRESH = 300, L_OPEN, L_CLEAR, A_LINK = 400, O_BACK = 500, O_NEXT, O_REC, O_BEEP, O_EMOJI, O_EMOJIKEY, O_EDIT = 520 };
 static void showBlacklistDialog(HWND parent);
@@ -421,6 +421,7 @@ static void buildMain() {
     toggleRow(L"Tự động viết hoa đầu câu", L"Tự động viết hoa chữ cái đầu tiên sau dấu chấm (.), hỏi (?), than (!) hoặc khi xuống dòng.", C_AUTOCAP, prefs::getAutoCapitalize() != 0);
     toggleRow(L"Kiểm tra chính tả", L"Chỉ bỏ dấu khi từ đang gõ đúng quy tắc chính tả tiếng Việt.", C_SPELL, prefs::getInt(L"Spelling", 1) != 0);
     toggleRow(L"Trả lại phím khi sai", L"Khi gõ xong một từ sai chính tả tiếng Việt, HKey trả lại đúng các phím bạn đã gõ.", C_RESTORE, prefs::getInt(L"RestoreIfInvalidWord", 1) != 0);
+    toggleRow(L"Tự sửa lỗi gõ", L"Tự sửa từ gõ nhầm hoặc đảo phím khi bấm dấu cách (vd: cso → có, teh → the). Bấm Xoá ngay sau đó để hoàn tác.", C_AUTOCORRECT, prefs::getInt(L"AutoCorrect", 1) != 0);
     endGroup();
     beginGroup(L"Gõ tắt");
     toggleRow(L"Bật gõ tắt", L"Tự động thay thế từ viết tắt bằng từ đầy đủ khi gõ phím cách hoặc dấu câu (macro.txt).", C_MACRO, prefs::getInt(L"UseMacro", 1) != 0);
@@ -500,6 +501,7 @@ static LRESULT CALLBACK mainProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         } break;
         case C_SPELL: flag(L"Spelling"); break;
         case C_RESTORE: flag(L"RestoreIfInvalidWord"); break;
+        case C_AUTOCORRECT: flag(L"AutoCorrect"); break;
         case C_MACRO: flag(L"UseMacro"); break;
         case C_MACROFILE: macro::openMacroFile(); break;
         case C_BLACKLIST_TOGGLE: prefs::setBlacklistEnabled(toggleOn(c)); core::reloadSettings(); refreshEnabled(); break;

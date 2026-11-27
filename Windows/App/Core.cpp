@@ -5,6 +5,7 @@
 #include "Prefs.h"
 #include "Macro.h"
 #include "Engine.h"
+#include "TouchModel.h"
 #include <imm.h>
 #ifndef IMC_GETOPENSTATUS
 #define IMC_GETOPENSTATUS 0x0005   // lives in immdev.h in recent SDKs
@@ -34,6 +35,7 @@ int vAutoSwitchByTyping = 1, vPerformLayoutCompat = 0;
 static int vTerminalDelayEnabled = 1;
 static int vTerminalDelayMs = 15;
 static int vAutoCapitalize = 1;
+static int vAutoCorrect = 1;
 static vikey::AutoCapitalizeHelper _autoCapHelper;
 static int vEmojiHotkey = 0;
 static std::atomic<bool> vEmojiOpen{false};
@@ -136,6 +138,7 @@ static std::wstring _frontApp = L"UnknownApp";
 static std::wstring _siteHost;
 static bool _cachedIsBrowser = false;
 static bool _cachedIsTerminal = false;
+static bool _cachedIsShellTerminal = false;
 static bool _cachedTlKeysAllowed = true;
 static bool _uipiBlocked = false;
 static bool _otherInputLanguage = false;
@@ -158,10 +161,12 @@ static bool _enPrevRestored = false;
 struct AutoFixUndo {
     bool active; int removeCount; wchar_t text[MAX_BUFF + 1]; int textCount; int language;
     Uint32 keys[MAX_BUFF]; int keyCount;
+    char rawForNoRepeat[32];
 };
 static AutoFixUndo _autoFixUndo = {};
 static Uint32 _undoneKeys[MAX_BUFF];
 static int _undoneCount = 0;
+static char _autoCorrectUndoneRaw[32] = {};
 
 static void StartEnglishWord(bool valid) { _enCount = 0; _enValid = valid; _enAfterShortcut = false; }
 static void ResetEnglishWord(bool valid) { _enAfterDouble = false; _undoneCount = 0; StartEnglishWord(valid); _enPrevN = 0; vAutoSwitchForget(); }
@@ -358,6 +363,7 @@ struct CoreSettings {
     int terminalDelayEnabled = 1;
     int terminalDelayMs = 15;
     int autoCapitalize = 1;
+    int autoCorrect = 1;
     bool useMacro = true;
     bool blacklistEnabled = true;
     std::vector<std::wstring> blacklist;
@@ -504,6 +510,7 @@ static bool queryFrontMostApp() {
     _uipiBlocked = uipiBlocked;
     _cachedIsBrowser = site::isBrowser(_frontApp);
     _cachedIsTerminal = isTerminalOrElectronApp(_frontApp);
+    _cachedIsShellTerminal = isShellTerminalApp(_frontApp);
     _cachedTlKeysAllowed = computeTlAppAllowed(_frontApp);
     {
         std::lock_guard<std::mutex> lk(_frontAppMutex);
@@ -583,6 +590,7 @@ static void onForegroundChangedInternal() {
     resyncModifierFlags();
     _lastFlag = 0;
     _maskPendingMods = 0;
+    _autoCorrectUndoneRaw[0] = 0;
     updateOtherInputLanguage();
     if (!queryFrontMostApp()) return;
     _siteHost.clear(); macro::reset(); _autoCapHelper.reset();
@@ -623,6 +631,7 @@ static void onSiteChangedInternal(const std::wstring& host) {
     if (host == _siteHost) return;
     TLEndWord("site");
     _siteHost = host;
+    _autoCorrectUndoneRaw[0] = 0;
 
     int oldLang = vLanguage;
     if (vUseSmartSwitchKey && !_isBlacklistActive) ApplySmartSwitch();
@@ -690,6 +699,7 @@ static CoreSettings readSettingsSnapshot() {
     s.terminalDelayEnabled = prefs::getTerminalDelayEnabled();
     s.terminalDelayMs = prefs::getTerminalDelayMs();
     s.autoCapitalize = prefs::getAutoCapitalize();
+    s.autoCorrect = prefs::getInt(L"AutoCorrect", 1);
     s.useMacro = prefs::getInt(L"UseMacro", 1) != 0;
     s.blacklistEnabled = prefs::isBlacklistEnabled();
     s.blacklist = prefs::getBlacklist();
@@ -715,6 +725,7 @@ static void applySettingsOnHookThread(const CoreSettings& s) {
     vTerminalDelayEnabled = s.terminalDelayEnabled;
     vTerminalDelayMs = s.terminalDelayMs;
     vAutoCapitalize = s.autoCapitalize;
+    vAutoCorrect = s.autoCorrect;
     macro::setEnabled(s.useMacro, false);
     updateOtherInputLanguage();
     {
@@ -857,6 +868,7 @@ static bool checkHotKey(int hotKeyData, bool checkKeyCode, unsigned flagsToCheck
 static void switchLanguage(const char* via) {
     PauseAutoSwitchAfterManual();
     _autoFixUndo.active = false;
+    _autoCorrectUndoneRaw[0] = 0;
     _autoCapHelper.reset();
     macro::reset();
     ResetEnglishWord(true);
@@ -871,11 +883,11 @@ static void switchLanguage(const char* via) {
 }
 static void setLanguageByUserInternal(int lang) {
     if (vLanguage == lang) return;
-    PauseAutoSwitchAfterManual(); _autoFixUndo.active = false; _autoCapHelper.reset(); macro::reset(); ResetEnglishWord(true);
+    PauseAutoSwitchAfterManual(); _autoFixUndo.active = false; _autoCorrectUndoneRaw[0] = 0; _autoCapHelper.reset(); macro::reset(); ResetEnglishWord(true);
     vLanguage = lang ? 1 : 0; TLManual("menu", vLanguage); VKLanguageChanged(true); startNewSession();
 }
 static void setLanguageQuietInternal(int lang) {
-    _autoFixUndo.active = false; _autoCapHelper.reset(); macro::reset(); ResetEnglishWord(true);
+    _autoFixUndo.active = false; _autoCorrectUndoneRaw[0] = 0; _autoCapHelper.reset(); macro::reset(); ResetEnglishWord(true);
     _autoPauseUntil = 0; vAutoSwitchByTyping = _cfg.autoSwitchByTyping;
     vLanguage = lang ? 1 : 0; VKLanguageChanged(false); startNewSession();
 }
@@ -900,10 +912,14 @@ static void RememberAutoFix(int correctedCount) {
         _autoFixUndo.keys[_autoFixUndo.keyCount++] = vAutoSwitchUndoData[x];
     }
     _autoFixUndo.removeCount = correctedCount + 1; _autoFixUndo.language = vLanguage; _autoFixUndo.active = true;
+    _autoFixUndo.rawForNoRepeat[0] = 0;
 }
 static bool UndoAutoFixWithBackspace() {
     if (!_autoFixUndo.active) return false;
     _autoFixUndo.active = false;
+    char undoneRaw[32];
+    strncpy(undoneRaw, _autoFixUndo.rawForNoRepeat, 31);
+    undoneRaw[31] = 0;
     int removeCount = _autoFixUndo.removeCount;
     int delay = getEffectiveDelayMs();
     if (vFixRecommendBrowser && _cachedIsBrowser) { wchar_t e = 0x202F; batchText(&e, 1); removeCount++; }
@@ -922,6 +938,8 @@ static bool UndoAutoFixWithBackspace() {
     if (vLanguage != _autoFixUndo.language) { vLanguage = _autoFixUndo.language; VKLanguageChanged(true); }
     startNewSession();
     ResetEnglishWord(false);
+    strncpy(_autoCorrectUndoneRaw, undoneRaw, 31);
+    _autoCorrectUndoneRaw[31] = 0;
     if (vLanguage == 0 && _autoFixUndo.keyCount > 0) {
         memcpy(_enKeys, _autoFixUndo.keys, _autoFixUndo.keyCount * sizeof(Uint32));
         _enCount = _autoFixUndo.keyCount;
@@ -934,6 +952,156 @@ static bool UndoAutoFixWithBackspace() {
 static void AutoSwitchTo(int language, const char* rule) {
     if (vLanguage == language) return;
     TLAuto(rule, language); vLanguage = language; VKLanguageChanged(true); startNewSession(); vAutoSwitchForget();
+}
+
+// ---- Typo & transposition Auto-correct (TouchModel) ------------------------------------------
+static const TMKey* qwertyLayout() {
+    static TMKey keys[26];
+    static bool ready = false;
+    if (!ready) {
+        const float W = 402.0f, side = 6.67f, gap = 6.0f, key = (W - 2.0f * side - 9.0f * gap) / 10.0f;
+        const float h = 43.0f, pitch = 54.0f;
+        const char* rows[3] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
+        const float x0[3] = {side, side + (key + gap) / 2.0f, side + (key + gap) * 1.5f};
+        int idx = 0;
+        for (int r = 0; r < 3; r++) {
+            for (int i = 0; rows[r][i] && idx < 26; i++) {
+                keys[idx++] = {rows[r][i], x0[r] + i * (key + gap), r * pitch, key, h};
+            }
+        }
+        ready = true;
+    }
+    return keys;
+}
+
+static bool IsAutoCorrectBreakKey(Uint16 key, bool shift) {
+    return key == KEY_SPACE || key == KEY_COMMA || key == KEY_SEMICOLON ||
+           key == KEY_RETURN || key == KEY_ENTER ||
+           (shift && (key == KEY_SLASH || key == KEY_1));
+}
+
+static void batchDelimiterKey(WORD rawVk, bool shift, bool extended) {
+    if (_keycode == KEY_SPACE) {
+        batchKey(VK_SPACE, shift);
+    } else if (_keycode == KEY_RETURN || _keycode == KEY_ENTER) {
+        batchKey(VK_RETURN, shift);
+    } else if (_keycode == KEY_TAB) {
+        batchKey(VK_TAB, shift);
+    } else {
+        Uint16 ch = keyCodeToCharacter(_keycode | (shift ? CAPS_MASK : 0));
+        if (ch) { wchar_t wc = (wchar_t)ch; batchText(&wc, 1); }
+        else batchKey(_rawVkCode ? _rawVkCode : rawVk, shift, extended);
+    }
+}
+
+static bool TryAutoCorrectAtBreak(bool shift, const Uint32* enSnapKeys = nullptr, int enSnapCount = 0, bool enSnapValid = false) {
+    if (!vAutoCorrect || OTHER_CONTROL_KEY || _cachedIsShellTerminal || site::isConfirmedPasswordField() ||
+        (vOtherLanguage && _otherInputLanguage) || !IsAutoCorrectBreakKey(_keycode, shift)) {
+        return false;
+    }
+
+    char raw[32] = {};
+    int capsCount = 0;
+    bool firstCap = false;
+    Uint16 screenChars[MAX_BUFF] = {};
+    int screenLen = 0;
+
+    if (vLanguage != 0) {
+        if (!vKeyGetCurrentWordForAutoCorrect(raw, sizeof(raw), &capsCount, &firstCap, screenChars, MAX_BUFF, &screenLen)) {
+            _autoCorrectUndoneRaw[0] = 0;
+            return false;
+        }
+    } else {
+        if (!enSnapValid || !enSnapKeys || enSnapCount < 3 || enSnapCount > 24) {
+            _autoCorrectUndoneRaw[0] = 0;
+            return false;
+        }
+        firstCap = (enSnapKeys[0] & CAPS_MASK) != 0;
+        for (int i = 0; i < enSnapCount; i++) {
+            Uint16 ch = keyCodeToCharacter(enSnapKeys[i] & CHAR_MASK);
+            if (ch < L'a' || ch > L'z') {
+                _autoCorrectUndoneRaw[0] = 0;
+                return false;
+            }
+            raw[i] = (char)ch;
+            bool upper = (enSnapKeys[i] & CAPS_MASK) != 0;
+            if (upper) capsCount++;
+            Uint16 disp = keyCodeToCharacter(enSnapKeys[i]);
+            if (disp == 0) {
+                _autoCorrectUndoneRaw[0] = 0;
+                return false;
+            }
+            screenChars[i] = disp;
+        }
+        raw[enSnapCount] = 0;
+        screenLen = enSnapCount;
+    }
+
+    if (capsCount >= 2) {
+        _autoCorrectUndoneRaw[0] = 0;
+        return false;
+    }
+    if (_autoCorrectUndoneRaw[0] && strcmp(_autoCorrectUndoneRaw, raw) == 0) {
+        _autoCorrectUndoneRaw[0] = 0;
+        return false;
+    }
+    _autoCorrectUndoneRaw[0] = 0;
+
+    if (vAutoSwitchWordScore(0, raw, nullptr, nullptr) > -1000 ||
+        vAutoSwitchWordScore(1, raw, nullptr, nullptr) > -1000 ||
+        vAutoSwitchIsVietnameseSpelling(raw)) {
+        return false;
+    }
+
+    TMCandidate cand[8];
+    int nc = TouchModel::candidates(raw, nullptr, nullptr, vLanguage, qwertyLayout(), 26, cand, 8);
+    if (!TouchModel::shouldCorrect(raw, cand, nc)) return false;
+    if (!vAutoSwitchByTyping && cand[0].vietnamese != vLanguage) return false;
+
+    std::wstring fixed(cand[0].textLen, L'\0');
+    for (int i = 0; i < cand[0].textLen; i++) fixed[i] = (wchar_t)cand[0].text[i];
+    if (firstCap && !fixed.empty()) CharUpperBuffW(&fixed[0], 1);
+
+    if ((int)fixed.size() == screenLen) {
+        bool same = true;
+        for (int i = 0; i < screenLen; i++) {
+            if ((Uint16)fixed[i] != screenChars[i]) { same = false; break; }
+        }
+        if (same) return false;
+    }
+
+    int removeCount = screenLen;
+    int delay = getEffectiveDelayMs();
+    if (vFixRecommendBrowser && _cachedIsBrowser) { wchar_t e = 0x202F; batchText(&e, 1); removeCount++; }
+    if (delay > 0 && removeCount > 0) {
+        batchBackspaces(removeCount);
+        flushBatch();
+        sleepWithTimerPrecision(delay);
+    } else if (removeCount > 0) {
+        batchBackspaces(removeCount);
+        flushBatch();
+    }
+    batchText(fixed.c_str(), (int)fixed.size());
+    batchDelimiterKey(_rawVkCode, shift, _rawExtended);
+    flushBatch();
+
+    _autoFixUndo.active = true;
+    _autoFixUndo.removeCount = (int)fixed.size() + 1;
+    _autoFixUndo.textCount = (std::min)(screenLen, (int)MAX_BUFF);
+    for (int i = 0; i < _autoFixUndo.textCount; i++) _autoFixUndo.text[i] = (wchar_t)screenChars[i];
+    _autoFixUndo.language = vLanguage;
+    _autoFixUndo.keyCount = 0;
+    strncpy(_autoFixUndo.rawForNoRepeat, raw, 31);
+    _autoFixUndo.rawForNoRepeat[31] = 0;
+
+    if (vAutoSwitchByTyping && cand[0].vietnamese != vLanguage) {
+        AutoSwitchTo(cand[0].vietnamese, cand[0].vietnamese ? "autocorrect_to_vi" : "autocorrect_to_en");
+    } else {
+        startNewSession();
+    }
+    ResetEnglishWord(true);
+    macro::reset();
+    return true;
 }
 static void ApplyAutoSwitchToEnglish(int correctedCount, bool atWordBreak) {
     vAutoSwitchRequest = -1;
@@ -972,7 +1140,7 @@ static bool HandleEnglishKeyForAutoSwitch(bool autoCap = false) {
     bool wordEnd = _keycode == KEY_SPACE || _keycode == KEY_COMMA || _keycode == KEY_DOT || _keycode == KEY_SEMICOLON || _keycode == KEY_RETURN || _keycode == KEY_ENTER ||
                    (shift && (_keycode == KEY_SLASH || _keycode == KEY_1 || _keycode == KEY_QUOTE || _keycode == KEY_0));
     int count = _enCount; bool valid = _enValid; bool afterDouble = _enAfterDouble; _enAfterDouble = false;
-    if (afterDouble && wordEnd && vAutoSwitchFixDoubledKey(_enKeys, count)) {
+    if (vAutoSwitchByTyping && afterDouble && wordEnd && vAutoSwitchFixDoubledKey(_enKeys, count)) {
         StartEnglishWord(IsWordStartKey(_keycode, shift)); _enPrevN = 0;
         int correctedCount = pData->newCharCount; SendEngineOutput(); RememberAutoFix(correctedCount); return true;
     }
@@ -984,7 +1152,7 @@ static bool HandleEnglishKeyForAutoSwitch(bool autoCap = false) {
     }
     const Uint32* previous[2] = {_enPrevKeys[0], _enPrevKeys[1]};
     vAutoSwitchPrevRestored = _enPrevRestored && _enPrevN >= 1;
-    bool converted = checked && vAutoSwitchCheckEnglishWord(_enKeys, count, previous, _enPrevCounts, _enPrevN);
+    bool converted = vAutoSwitchByTyping && checked && vAutoSwitchCheckEnglishWord(_enKeys, count, previous, _enPrevCounts, _enPrevN);
     if (!converted && _keycode == KEY_SPACE && valid && count >= 1) {
         _enPrevRestored = false;
         memcpy(_enPrevKeys[1], _enPrevKeys[0], sizeof(_enPrevKeys[0])); _enPrevCounts[1] = _enPrevCounts[0];
@@ -1185,23 +1353,13 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
                 flushBatch();
             }
             batchText(repl.c_str(), (int)repl.size());
-
-            if (_keycode == KEY_SPACE) {
-                batchKey(VK_SPACE, shift);
-            } else if (_keycode == KEY_RETURN || _keycode == KEY_ENTER) {
-                batchKey(VK_RETURN, shift);
-            } else if (_keycode == KEY_TAB) {
-                batchKey(VK_TAB, shift);
-            } else {
-                Uint16 ch = keyCodeToCharacter(_keycode | (shift ? CAPS_MASK : 0));
-                if (ch) { wchar_t wc = (wchar_t)ch; batchText(&wc, 1); }
-                else batchKey(_rawVkCode ? _rawVkCode : (WORD)k->vkCode, shift, _rawExtended);
-            }
+            batchDelimiterKey((WORD)k->vkCode, shift, _rawExtended);
             flushBatch();
 
             startNewSession();
             ResetEnglishWord(true);
             _autoFixUndo.active = false;
+            _autoCorrectUndoneRaw[0] = 0;
             macro::reset();
             _swallowedVks[vkByte] = true;
             return 1;
@@ -1215,9 +1373,21 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
     }
 
     if (vLanguage == 0) {
-        if (vAutoSwitchByTyping && HandleEnglishKeyForAutoSwitch(autoCapThisKey)) {
-            _swallowedVks[vkByte] = true;
-            return 1;
+        if (vAutoSwitchByTyping || vAutoCorrect) {
+            Uint32 enSnapKeys[MAX_BUFF];
+            int enSnapCount = _enCount;
+            bool enSnapValid = _enValid;
+            if (enSnapCount > 0 && enSnapCount <= MAX_BUFF) {
+                memcpy(enSnapKeys, _enKeys, enSnapCount * sizeof(Uint32));
+            }
+            if (HandleEnglishKeyForAutoSwitch(autoCapThisKey)) {
+                _swallowedVks[vkByte] = true;
+                return 1;
+            }
+            if (TryAutoCorrectAtBreak(shift, enSnapKeys, enSnapCount, enSnapValid)) {
+                _swallowedVks[vkByte] = true;
+                return 1;
+            }
         }
         if (autoCapThisKey) {
             Uint16 upperChar = keyCodeToCharacter(_keycode | CAPS_MASK);
@@ -1234,6 +1404,11 @@ static LRESULT CALLBACK keyboardHook(int nCode, WPARAM wParam, LPARAM lParam) {
 
     if (vOtherLanguage && _otherInputLanguage && imeComposing()) {
         return CallNextHookEx(_kbHook, nCode, wParam, lParam);
+    }
+
+    if (TryAutoCorrectAtBreak(shift)) {
+        _swallowedVks[vkByte] = true;
+        return 1;
     }
 
     vAutoSwitchRequest = -1;
@@ -1282,7 +1457,7 @@ static LRESULT CALLBACK mouseHook(int nCode, WPARAM wParam, LPARAM lParam) {
             RECT r; GetWindowRect(ew, &r); POINT p = ((MSLLHOOKSTRUCT*)lParam)->pt;
             if (!PtInRect(&r, p)) PostMessageW(ew, WM_APP + 11, 0, 0);
         }
-        _autoFixUndo.active = false; TLNoteClick(); macro::reset(); _autoCapHelper.reset();
+        _autoFixUndo.active = false; _autoCorrectUndoneRaw[0] = 0; TLNoteClick(); macro::reset(); _autoCapHelper.reset();
         if (vLanguage == 0) ResetEnglishWord(true);
         else vKeyHandleEvent(vKeyEvent::Mouse, vKeyEventState::MouseDown, 0);
     }
@@ -1308,7 +1483,7 @@ static LRESULT CALLBACK hookMsgProc(HWND h, UINT m, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_HOOK_RESET_TYPING:
-        ResetEnglishWord(true); _autoFixUndo.active = false; _autoCapHelper.reset(); macro::reset(); startNewSession();
+        ResetEnglishWord(true); _autoFixUndo.active = false; _autoCorrectUndoneRaw[0] = 0; _autoCapHelper.reset(); macro::reset(); startNewSession();
         return 0;
     case WM_HOOK_INSERT_TEXT: {
         auto* txt = (std::wstring*)lp;

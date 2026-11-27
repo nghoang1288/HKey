@@ -12,6 +12,8 @@ std::wstring currentHost();
 void poll();
 /// True while a password field has the focus or focus state is undetermined (Fail-Closed).
 bool focusedIsPassword();
+/// True only when UIA has explicitly confirmed the focused control is a password field (Fail-Open).
+bool isConfirmedPasswordField();
 /// Re-checks the focused control now (call on focus changes; poll() does it too).
 void pollPassword();
 /// Background worker thread lifecycle

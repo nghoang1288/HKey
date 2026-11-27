@@ -1546,6 +1546,36 @@ static void asInitLetters() {
     _asLetterReady = true;
 }
 
+bool vKeyGetCurrentWordForAutoCorrect(char* rawLetters, int maxLetters, int* capsCount, bool* firstCap,
+                                      Uint16* screenChars, int maxScreenChars, int* screenLen) {
+    if (!rawLetters || maxLetters < 4 || !capsCount || !firstCap || !screenChars || maxScreenChars < 1 || !screenLen)
+        return false;
+    if (!_asWordStartOk || _afterDigit || !_longWordHelper.empty() ||
+        _index <= 0 || _stateIndex < 3 || _stateIndex >= maxLetters || _index > maxScreenChars)
+        return false;
+    asInitLetters();
+    int caps = 0;
+    bool fCap = (KeyStates[0] & CAPS_MASK) != 0;
+    for (int i = 0; i < _stateIndex; i++) {
+        Uint16 kc = (Uint16)(KeyStates[i] & CHAR_MASK);
+        char ch = (kc < 256) ? _asLetter[kc] : 0;
+        if (!ch) return false;
+        rawLetters[i] = ch;
+        if (KeyStates[i] & CAPS_MASK) caps++;
+    }
+    rawLetters[_stateIndex] = 0;
+    for (int i = 0; i < _index; i++) {
+        Uint32 code = getCharacterCode(TypingWord[i]);
+        Uint16 u = (code & CHAR_CODE_MASK) ? (Uint16)(code & 0xFFFF) : keyCodeToCharacter(code);
+        if (u == 0) return false;
+        screenChars[i] = u;
+    }
+    *capsCount = caps;
+    *firstCap = fCap;
+    *screenLen = _index;
+    return true;
+}
+
 static inline char asLetterOf(const Uint32& data) {
     Uint32 code = data & CHAR_MASK;
     return code < 256 ? _asLetter[code] : 0;

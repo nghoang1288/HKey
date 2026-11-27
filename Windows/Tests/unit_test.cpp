@@ -480,6 +480,138 @@ int wmain() {
         }
     }
 
+    // Test 9: AutoCorrect (TouchModel + Engine snapshot + Shell terminal guard)
+    printf("\n--- Test 9: AutoCorrect Regression Coverage ---\n");
+    {
+        const float W = 402.0f, side = 6.67f, gap = 6.0f, key = (W - 2.0f * side - 9.0f * gap) / 10.0f;
+        const float h = 43.0f, pitch = 54.0f;
+        const char* rows[3] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
+        const float x0[3] = {side, side + (key + gap) / 2.0f, side + (key + gap) * 1.5f};
+        TMKey keys[26];
+        int ki = 0;
+        for (int r = 0; r < 3; r++) {
+            for (int i = 0; rows[r][i] && ki < 26; i++) {
+                keys[ki++] = {rows[r][i], x0[r] + i * (key + gap), r * pitch, key, h};
+            }
+        }
+        auto toUtf8 = [](const unsigned short* s, int n) {
+            std::string o;
+            for (int i = 0; i < n; i++) {
+                unsigned u = s[i];
+                if (u < 0x80) o += (char)u;
+                else if (u < 0x800) { o += (char)(0xC0 | (u >> 6)); o += (char)(0x80 | (u & 63)); }
+                else { o += (char)(0xE0 | (u >> 12)); o += (char)(0x80 | ((u >> 6) & 63)); o += (char)(0x80 | (u & 63)); }
+            }
+            return o;
+        };
+        struct { const char* typed; int mode; const char* want; } fixCases[] = {
+            {"cso", 1, "có"},
+            {"lfa", 1, "là"},
+            {"vfa", 1, "và"},
+            {"teh", 0, "the"},
+            {"recieve", 0, "receive"},
+        };
+        for (const auto& fc : fixCases) {
+            TMCandidate cand[8];
+            int nc = TouchModel::candidates(fc.typed, nullptr, nullptr, fc.mode, keys, 26, cand, 8);
+            bool ok = TouchModel::shouldCorrect(fc.typed, cand, nc);
+            std::string got = ok ? toUtf8(cand[0].text, cand[0].textLen) : "";
+            if (!ok || got != fc.want) {
+                printf("[FAIL] AutoCorrect '%s' (mode=%d): ok=%d got='%s' want='%s'\n",
+                       fc.typed, fc.mode, ok ? 1 : 0, got.c_str(), fc.want);
+                failed++;
+            } else {
+                printf("[PASS] AutoCorrect '%s' -> '%s'\n", fc.typed, got.c_str());
+            }
+        }
+        const char* keepCases[] = {"cos", "more", "chao", "css", "csv", "cty", "khong"};
+        for (const char* kw : keepCases) {
+            TMCandidate cand[8];
+            int nc = TouchModel::candidates(kw, nullptr, nullptr, 1, keys, 26, cand, 8);
+            if (TouchModel::shouldCorrect(kw, cand, nc)) {
+                printf("[FAIL] Valid/kept word '%s' was wrongly corrected to '%s'\n",
+                       kw, toUtf8(cand[0].text, cand[0].textLen).c_str());
+                failed++;
+            }
+        }
+        printf("[PASS] Valid/kept words preserved untouched\n");
+
+        vKeyInit();
+        vSetCheckSpelling();
+        vLanguage = 1;
+        vCheckSpelling = 1;
+        vRestoreIfWrongSpelling = 1;
+        auto typeRawKeys = [](const char* s) {
+            for (const char* p = s; *p; p++) {
+                bool isCaps = false;
+                Uint16 code = K(*p, isCaps);
+                vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, code, isCaps ? 1 : 0, false);
+            }
+        };
+        char rawBuf[32] = {};
+        Uint16 scrBuf[MAX_BUFF] = {};
+        int capsCnt = 0, scrLen = 0;
+        bool fCap = false;
+
+        startNewSession();
+        vAutoSwitchForget();
+        typeRawKeys("cso");
+        if (!vKeyGetCurrentWordForAutoCorrect(rawBuf, sizeof(rawBuf), &capsCnt, &fCap, scrBuf, MAX_BUFF, &scrLen) ||
+            std::string(rawBuf) != "cso" || scrLen != 3 || capsCnt != 0 || fCap) {
+            printf("[FAIL] Word snapshot 'cso' failed (raw=%s len=%d caps=%d)\n", rawBuf, scrLen, capsCnt);
+            failed++;
+        } else {
+            printf("[PASS] Word snapshot 'cso' OK\n");
+        }
+
+        startNewSession();
+        vAutoSwitchForget();
+        typeRawKeys("Cso");
+        if (!vKeyGetCurrentWordForAutoCorrect(rawBuf, sizeof(rawBuf), &capsCnt, &fCap, scrBuf, MAX_BUFF, &scrLen) ||
+            std::string(rawBuf) != "cso" || capsCnt != 1 || !fCap) {
+            printf("[FAIL] Word snapshot 'Cso' failed (raw=%s caps=%d fCap=%d)\n", rawBuf, capsCnt, fCap ? 1 : 0);
+            failed++;
+        } else {
+            printf("[PASS] Word snapshot 'Cso' OK\n");
+        }
+
+        startNewSession();
+        vAutoSwitchForget();
+        typeRawKeys("nhuwg");
+        if (!vKeyGetCurrentWordForAutoCorrect(rawBuf, sizeof(rawBuf), &capsCnt, &fCap, scrBuf, MAX_BUFF, &scrLen) ||
+            std::string(rawBuf) != "nhuwg" || scrLen != 4) {
+            printf("[FAIL] Word snapshot 'nhuwg' failed (raw=%s len=%d)\n", rawBuf, scrLen);
+            failed++;
+        } else {
+            printf("[PASS] Word snapshot 'nhuwg' OK\n");
+        }
+
+        startNewSession();
+        vAutoSwitchForget();
+        typeRawKeys("foo");
+        vKeyHandleEvent(vKeyEvent::Keyboard, vKeyEventState::KeyDown, KEY_DOT, 0, false);
+        typeRawKeys("cso");
+        if (vKeyGetCurrentWordForAutoCorrect(rawBuf, sizeof(rawBuf), &capsCnt, &fCap, scrBuf, MAX_BUFF, &scrLen)) {
+            printf("[FAIL] Word snapshot after '.' should return false (_asWordStartOk == false)\n");
+            failed++;
+        } else {
+            printf("[PASS] Word snapshot ignores subwords after '.'\n");
+        }
+
+        if (!vikey::core::isShellTerminalApp(L"windowsterminal.exe") ||
+            !vikey::core::isShellTerminalApp(L"pwsh.exe") ||
+            !vikey::core::isShellTerminalApp(L"cmd.exe") ||
+            vikey::core::isShellTerminalApp(L"chrome.exe") ||
+            vikey::core::isShellTerminalApp(L"discord.exe") ||
+            vikey::core::isShellTerminalApp(L"code.exe") ||
+            vikey::core::isShellTerminalApp(L"notepad.exe")) {
+            printf("[FAIL] isShellTerminalApp classification mismatch\n");
+            failed++;
+        } else {
+            printf("[PASS] isShellTerminalApp classification OK\n");
+        }
+    }
+
     printf("\n===================================\n");
     if (failed == 0) {
         printf("ALL TESTS PASSED SUCCESSFULLY! (0 failures)\n");

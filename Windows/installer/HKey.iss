@@ -1,7 +1,7 @@
 ; HKey for Windows installer (Inno Setup 6). Per-user, no admin prompt, so the app can update itself.
 ;   iscc /DVersion=1.1 /DArch=x64 /DSrc=..\build\App HKey.iss
 #ifndef Version
-  #define Version "1.2.1"
+  #define Version "1.2.2"
 #endif
 #ifndef Arch
   #define Arch "x64"

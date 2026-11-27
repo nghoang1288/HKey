@@ -69,6 +69,22 @@ inline bool isTerminalOrElectronApp(const std::wstring& app) {
     }
     return false;
 }
+inline bool isShellTerminalApp(const std::wstring& app) {
+    if (app.empty() || app == L"UnknownApp") return false;
+    std::wstring name = app;
+    size_t slash = name.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) name = name.substr(slash + 1);
+    for (auto& c : name) c = (wchar_t)towlower(c);
+    static const wchar_t* shells[] = {
+        L"windowsterminal.exe", L"wt.exe", L"openconsole.exe", L"conhost.exe",
+        L"cmd.exe", L"powershell.exe", L"pwsh.exe", L"alacritty.exe",
+        L"wezterm-gui.exe", L"wezterm.exe", L"hyper.exe", L"tabby.exe",
+        L"putty.exe", L"kitty.exe", L"ghostty.exe", L"warp.exe",
+        L"mintty.exe", L"wsl.exe"
+    };
+    for (const auto* s : shells) if (name == s) return true;
+    return false;
+}
 
 /// Called on the UI thread whenever the language changes (menu icon, settings window).
 void setLanguageObserver(std::function<void(int)> f);

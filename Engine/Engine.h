@@ -204,6 +204,8 @@ void vKeyHandleEvent(const vKeyEvent& event,
  */
 void startNewSession();
 int vKeyCurrentWordLength();
+bool vKeyGetCurrentWordForAutoCorrect(char* rawLetters, int maxLetters, int* capsCount, bool* firstCap,
+                                      Uint16* screenChars, int maxScreenChars, int* screenLen);
 
 /**
  * reset spelling value

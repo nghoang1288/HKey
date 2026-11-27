@@ -108,6 +108,11 @@ bool focusedIsPassword() {
     return _focusPassword.load(std::memory_order_relaxed);
 }
 
+bool isConfirmedPasswordField() {
+    if (ownWindowInFront()) return false;
+    return _focusDetermined.load(std::memory_order_relaxed) && _focusPassword.load(std::memory_order_relaxed);
+}
+
 std::wstring currentHost() {
     std::lock_guard<std::mutex> lock(_hostMutex);
     return _cachedHost;
